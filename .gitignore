@@ -1,0 +1,41 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+conda-meta/
+
+# Training data and generated artifacts
+data/
+outputs/
+runs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# Logs and process files
+*.log
+*.jsonl
+*.pid
+
+# Local tooling and large bundled resources
+.codex/
+nature-skills-main/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
