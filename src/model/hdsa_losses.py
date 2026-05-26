@@ -22,6 +22,47 @@ def sharpen_assignment(gamma: torch.Tensor, power: float = 2.0) -> torch.Tensor:
     return gamma / gamma.sum(dim=1, keepdim=True).clamp_min(1e-12)
 
 
+def pairwise_confusion_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    label2id: dict[str, int],
+    pairs: list[tuple[str, str]],
+    margin: float = 0.3,
+) -> torch.Tensor:
+    losses = []
+    for name_a, name_b in pairs:
+        if name_a not in label2id or name_b not in label2id:
+            continue
+        id_a = label2id[name_a]
+        id_b = label2id[name_b]
+        mask_a = labels == id_a
+        if mask_a.any():
+            diff = logits[mask_a, id_a] - logits[mask_a, id_b]
+            losses.append(F.relu(margin - diff).mean())
+        mask_b = labels == id_b
+        if mask_b.any():
+            diff = logits[mask_b, id_b] - logits[mask_b, id_a]
+            losses.append(F.relu(margin - diff).mean())
+    return torch.stack(losses).mean() if losses else logits.new_tensor(0.0)
+
+
+def pairwise_anchor_separation_loss(
+    anchors: torch.Tensor,
+    label2id: dict[str, int],
+    pairs: list[tuple[str, str]],
+    upper: float = 0.20,
+) -> torch.Tensor:
+    anchors = F.normalize(anchors, dim=-1)
+    centers = F.normalize(anchors.mean(dim=1), dim=-1)
+    losses = []
+    for name_a, name_b in pairs:
+        if name_a not in label2id or name_b not in label2id:
+            continue
+        sim = torch.sum(centers[label2id[name_a]] * centers[label2id[name_b]])
+        losses.append(F.relu(sim - upper))
+    return torch.stack(losses).mean() if losses else anchors.new_tensor(0.0)
+
+
 def anchor_preserve_loss(anchors: torch.Tensor, init_anchors: torch.Tensor) -> torch.Tensor:
     anchors = F.normalize(anchors, dim=-1)
     init_anchors = F.normalize(init_anchors.to(anchors.device), dim=-1)

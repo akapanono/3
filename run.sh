@@ -24,4 +24,18 @@ python src/run.py \
   --ot_sharpen_power 2.0 \
   --prototype_momentum 0.95 \
   --ema_conf_threshold 0.45 \
+  --class_adaptive_ema \
+  --default_ema_conf_threshold 0.45 \
+  --low_conf_classes angry,frustrated \
+  --low_conf_threshold 0.38 \
+  --happy_conf_threshold 0.42 \
+  --use_ema_fallback \
+  --fallback_momentum 0.98 \
+  --pair_loss_weight 0.1 \
+  --pair_margin 0.3 \
+  --pair_anchor_loss_weight 0.05 \
+  --pair_anchor_upper 0.20 \
+  --happy_ce_weight 1.3 \
+  --use_intensity_head \
+  --intensity_loss_weight 0.05 \
   "$@"

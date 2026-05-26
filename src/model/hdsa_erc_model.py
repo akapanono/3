@@ -39,8 +39,9 @@ class HDSAERCModel(nn.Module):
             nn.Linear(hidden_dim, config.anchor_dim),
         )
         self.classifier = nn.Linear(config.anchor_dim, config.num_classes)
+        self.intensity_classifier = nn.Linear(config.anchor_dim, 3)
         anchors = self._load_or_init_anchors(config)
-        self.register_buffer("domain_anchors", F.normalize(anchors.float(), dim=-1))
+        self.domain_anchors = nn.Parameter(F.normalize(anchors.float(), dim=-1))
 
     def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, mask_pos: torch.Tensor) -> dict[str, torch.Tensor]:
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
@@ -52,6 +53,10 @@ class HDSAERCModel(nn.Module):
 
     def get_anchors(self) -> torch.Tensor:
         return F.normalize(self.domain_anchors, dim=-1)
+
+    @torch.no_grad()
+    def normalize_domain_anchors_(self) -> None:
+        self.domain_anchors.copy_(F.normalize(self.domain_anchors, dim=-1))
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, mask_pos: torch.Tensor) -> dict[str, torch.Tensor]:
         enc = self.encode(input_ids=input_ids, attention_mask=attention_mask, mask_pos=mask_pos)
@@ -66,6 +71,7 @@ class HDSAERCModel(nn.Module):
             "logits": logits,
             "logits_cls": logits_cls,
             "logits_anchor": logits_anchor,
+            "logits_intensity": self.intensity_classifier(z),
             "z": z,
             "anchors": anchors,
             "scores": scores,
@@ -79,10 +85,15 @@ class HDSAERCModel(nn.Module):
         soft_targets: torch.Tensor,
         momentum: float = 0.95,
         threshold: float = 0.45,
+        class_thresholds: torch.Tensor | None = None,
+        use_fallback: bool = False,
+        fallback_momentum: float = 0.98,
     ) -> torch.Tensor:
         cnum, mnum, _ = self.domain_anchors.shape
         reps = F.normalize(reps.detach(), dim=-1)
         target = soft_targets.detach().reshape(-1, cnum, mnum)
+        if class_thresholds is not None:
+            class_thresholds = class_thresholds.to(reps.device)
         update_counts = torch.zeros(cnum, mnum, device=reps.device)
         for cls in range(cnum):
             idx = torch.where(labels == cls)[0]
@@ -91,20 +102,32 @@ class HDSAERCModel(nn.Module):
             z_cls = reps[idx]
             gamma_cls = target[idx, cls]
             max_prob, hard_sub = gamma_cls.max(dim=1)
-            keep = max_prob >= threshold
-            if keep.sum().item() == 0:
+            cls_threshold = float(class_thresholds[cls].item()) if class_thresholds is not None else threshold
+            keep = max_prob >= cls_threshold
+            if keep.sum().item() > 0:
+                z_keep = z_cls[keep]
+                sub_keep = hard_sub[keep]
+                for sub in range(mnum):
+                    sub_idx = torch.where(sub_keep == sub)[0]
+                    if sub_idx.numel() == 0:
+                        continue
+                    mean = F.normalize(z_keep[sub_idx].mean(dim=0), dim=-1)
+                    old = self.domain_anchors[cls, sub]
+                    new = momentum * old + (1.0 - momentum) * mean
+                    self.domain_anchors[cls, sub] = F.normalize(new, dim=-1)
+                    update_counts[cls, sub] += sub_idx.numel()
+            if not use_fallback or update_counts[cls].sum().item() > 0:
                 continue
-            z_keep = z_cls[keep]
-            sub_keep = hard_sub[keep]
             for sub in range(mnum):
-                sub_idx = torch.where(sub_keep == sub)[0]
-                if sub_idx.numel() == 0:
+                weight = gamma_cls[:, sub]
+                mass = weight.sum()
+                if mass.item() <= 1e-6:
                     continue
-                mean = F.normalize(z_keep[sub_idx].mean(dim=0), dim=-1)
+                mean = F.normalize((weight[:, None] * z_cls).sum(dim=0) / mass.clamp_min(1e-6), dim=-1)
                 old = self.domain_anchors[cls, sub]
-                new = momentum * old + (1.0 - momentum) * mean
+                new = fallback_momentum * old + (1.0 - fallback_momentum) * mean
                 self.domain_anchors[cls, sub] = F.normalize(new, dim=-1)
-                update_counts[cls, sub] += sub_idx.numel()
+                update_counts[cls, sub] += mass
         return update_counts
 
     def _load_or_init_anchors(self, config: HDSAConfig) -> torch.Tensor:

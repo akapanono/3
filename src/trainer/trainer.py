@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
@@ -16,7 +16,40 @@ from src.anchors.anchor_utils import anchor_similarity_stats
 from src.anchors.sinkhorn import ot_assign_by_class
 from src.metrics import classification_metrics
 from src.model import HDSAConfig, HDSAERCModel
-from src.model.hdsa_losses import compactness_loss, sharpen_assignment, soft_cross_entropy
+from src.model.hdsa_losses import (
+    compactness_loss,
+    pairwise_anchor_separation_loss,
+    pairwise_confusion_loss,
+    sharpen_assignment,
+    soft_cross_entropy,
+)
+
+
+CONFUSION_PAIRS = [
+    ("happy", "excited"),
+    ("angry", "frustrated"),
+    ("neutral", "frustrated"),
+    ("sad", "frustrated"),
+    ("sad", "neutral"),
+]
+CONFUSION_LOG_PAIRS = [
+    ("happy", "excited"),
+    ("excited", "happy"),
+    ("angry", "frustrated"),
+    ("frustrated", "angry"),
+    ("neutral", "frustrated"),
+    ("frustrated", "neutral"),
+    ("sad", "frustrated"),
+    ("sad", "neutral"),
+]
+INTENSITY_MAP = {
+    "neutral": 0,
+    "sad": 1,
+    "happy": 1,
+    "frustrated": 2,
+    "angry": 2,
+    "excited": 2,
+}
 
 
 class HDSATrainer:
@@ -47,6 +80,9 @@ class HDSATrainer:
             self.optimizer,
             lr_lambda=self._linear_warmup_decay(args.warmup_ratio, total_steps),
         )
+        self.ce_weights = self._build_ce_weights().to(self.device)
+        self.class_thresholds = self._build_class_thresholds().to(self.device) if args.class_adaptive_ema else None
+        self.intensity_targets_by_class = self._build_intensity_targets().to(self.device)
 
     def train(self) -> None:
         self._init_logs()
@@ -105,6 +141,9 @@ class HDSATrainer:
             "loss_ce": 0.0,
             "loss_proto": 0.0,
             "loss_compact": 0.0,
+            "loss_pair": 0.0,
+            "loss_pair_anchor": 0.0,
+            "loss_intensity": 0.0,
             "ot_entropy_mean": 0.0,
             "ot_entropy_max": 0.0,
             "ot_max_prob_mean": 0.0,
@@ -127,7 +166,7 @@ class HDSATrainer:
             )
             z = outputs["z"]
             anchors = outputs["anchors"]
-            loss_ce = F.cross_entropy(outputs["logits"], labels)
+            loss_ce = F.cross_entropy(outputs["logits"], labels, weight=self.ce_weights)
             soft_targets, assigned_anchor, assignment_counts, ot_stats = ot_assign_by_class(
                 reps=z.detach(),
                 labels=labels,
@@ -140,11 +179,44 @@ class HDSATrainer:
             soft_targets_for_loss = sharpen_assignment(soft_targets, power=self.args.ot_sharpen_power)
             loss_proto = soft_cross_entropy(proto_logits, soft_targets_for_loss)
             loss_compact = compactness_loss(z, assigned_anchor.detach())
-            loss = loss_ce + self.args.proto_loss_weight * loss_proto + self.args.compact_loss_weight * loss_compact
+            loss_pair = (
+                pairwise_confusion_loss(
+                    outputs["logits"],
+                    labels,
+                    self.label2id,
+                    CONFUSION_PAIRS,
+                    margin=self.args.pair_margin,
+                )
+                if self.args.pair_loss_weight > 0
+                else z.new_tensor(0.0)
+            )
+            loss_pair_anchor = (
+                pairwise_anchor_separation_loss(
+                    anchors,
+                    self.label2id,
+                    CONFUSION_PAIRS,
+                    upper=self.args.pair_anchor_upper,
+                )
+                if self.args.pair_anchor_loss_weight > 0
+                else z.new_tensor(0.0)
+            )
+            loss_intensity = z.new_tensor(0.0)
+            if self.args.use_intensity_head and self.args.intensity_loss_weight > 0:
+                intensity_labels = self.intensity_targets_by_class[labels]
+                loss_intensity = F.cross_entropy(outputs["logits_intensity"], intensity_labels)
+            loss = (
+                loss_ce
+                + self.args.proto_loss_weight * loss_proto
+                + self.args.compact_loss_weight * loss_compact
+                + self.args.pair_loss_weight * loss_pair
+                + self.args.pair_anchor_loss_weight * loss_pair_anchor
+                + self.args.intensity_loss_weight * loss_intensity
+            )
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
             self.optimizer.step()
+            self.model.normalize_domain_anchors_()
             self.scheduler.step()
             ema_counts = self.model.ema_update_anchors_confident(
                 reps=z.detach(),
@@ -152,6 +224,9 @@ class HDSATrainer:
                 soft_targets=soft_targets.detach(),
                 momentum=self.args.prototype_momentum,
                 threshold=self.args.ema_conf_threshold,
+                class_thresholds=self.class_thresholds,
+                use_fallback=self.args.use_ema_fallback,
+                fallback_momentum=self.args.fallback_momentum,
             )
             bsz = labels.size(0)
             total += bsz
@@ -161,6 +236,9 @@ class HDSATrainer:
             sums["loss_ce"] += float(loss_ce.detach().cpu()) * bsz
             sums["loss_proto"] += float(loss_proto.detach().cpu()) * bsz
             sums["loss_compact"] += float(loss_compact.detach().cpu()) * bsz
+            sums["loss_pair"] += float(loss_pair.detach().cpu()) * bsz
+            sums["loss_pair_anchor"] += float(loss_pair_anchor.detach().cpu()) * bsz
+            sums["loss_intensity"] += float(loss_intensity.detach().cpu()) * bsz
             sums["ot_entropy_mean"] += ot_stats["ot_entropy_mean"] * bsz
             sums["ot_entropy_max"] = max(sums["ot_entropy_max"], ot_stats["ot_entropy_max"])
             sums["ot_max_prob_mean"] += ot_stats["ot_max_prob_mean"] * bsz
@@ -189,7 +267,7 @@ class HDSATrainer:
                 attention_mask=batch["attention_mask"].to(self.device),
                 mask_pos=batch["mask_pos"].to(self.device),
             )
-            losses.append(float(F.cross_entropy(outputs["logits"], labels).cpu()) * labels.size(0))
+            losses.append(float(F.cross_entropy(outputs["logits"], labels, weight=self.ce_weights).cpu()) * labels.size(0))
             y_true.extend(labels.cpu().tolist())
             y_pred.extend(outputs["logits"].argmax(dim=-1).cpu().tolist())
             sample_ids.extend(ex.sample_id for ex in batch["examples"])
@@ -207,9 +285,50 @@ class HDSATrainer:
             }
         metrics = classification_metrics(y_true, y_pred)
         metrics["loss_ce"] = sum(losses) / max(1, len(y_true))
+        metrics.update(self._per_class_f1(y_true, y_pred))
+        metrics.update(self._confusion_pair_counts(y_true, y_pred))
         if split_name:
             self._save_detailed_eval(split_name, y_true, y_pred, sample_ids, texts)
         return metrics
+
+    def _build_ce_weights(self) -> torch.Tensor:
+        weights = torch.ones(len(self.label2id), dtype=torch.float)
+        if "happy" in self.label2id:
+            weights[self.label2id["happy"]] *= float(self.args.happy_ce_weight)
+        return weights
+
+    def _build_class_thresholds(self) -> torch.Tensor:
+        thresholds = torch.full((len(self.label2id),), float(self.args.default_ema_conf_threshold))
+        for name in self.args.low_conf_classes.split(","):
+            name = name.strip()
+            if name in self.label2id:
+                thresholds[self.label2id[name]] = float(self.args.low_conf_threshold)
+        if "happy" in self.label2id:
+            thresholds[self.label2id["happy"]] = float(self.args.happy_conf_threshold)
+        return thresholds
+
+    def _build_intensity_targets(self) -> torch.Tensor:
+        targets = torch.zeros(len(self.label2id), dtype=torch.long)
+        for name, idx in self.label2id.items():
+            targets[idx] = INTENSITY_MAP.get(name, 1)
+        return targets
+
+    def _per_class_f1(self, y_true, y_pred) -> dict[str, float]:
+        labels = sorted(self.id2label)
+        scores = f1_score(y_true, y_pred, labels=labels, average=None, zero_division=0)
+        return {f"{self.id2label[idx]}_f1": float(score) for idx, score in zip(labels, scores)}
+
+    def _confusion_pair_counts(self, y_true, y_pred) -> dict[str, int]:
+        counts = {}
+        for src, dst in CONFUSION_LOG_PAIRS:
+            key = f"confusion_{src}_to_{dst}"
+            if src not in self.label2id or dst not in self.label2id:
+                counts[key] = 0
+                continue
+            src_id = self.label2id[src]
+            dst_id = self.label2id[dst]
+            counts[key] = int(sum(1 for gold, pred in zip(y_true, y_pred) if gold == src_id and pred == dst_id))
+        return counts
 
     def _build_optimizer(self):
         encoder_params, other_params = [], []
@@ -280,7 +399,9 @@ class HDSATrainer:
             f"[{_now()}] epoch {row['epoch']} finished",
             (
                 f"  train loss_total={train['loss_total']:.6f} loss_ce={train['loss_ce']:.6f} "
-                f"loss_proto={train['loss_proto']:.6f} loss_compact={train['loss_compact']:.6f}"
+                f"loss_proto={train['loss_proto']:.6f} loss_compact={train['loss_compact']:.6f} "
+                f"loss_pair={train['loss_pair']:.6f} loss_pair_anchor={train['loss_pair_anchor']:.6f} "
+                f"loss_intensity={train['loss_intensity']:.6f}"
             ),
             (
                 f"  ot entropy_mean={train['ot_entropy_mean']:.6f} entropy_max={train['ot_entropy_max']:.6f} "
@@ -298,6 +419,8 @@ class HDSATrainer:
                 f"macro_f1={test['macro_f1']:.6f}"
             ),
             f"  anchor_stats={row['anchor_stats']}",
+            f"  test class_f1={self._select_metrics(test, [f'{name}_f1' for name in self.label2id])}",
+            f"  test confusion_pairs={self._select_metrics(test, [f'confusion_{a}_to_{b}' for a, b in CONFUSION_LOG_PAIRS])}",
         ]
         for label, counts in row["ot_assignment_counts"].items():
             lines.append(f"  class {label} assignment: {counts}")
@@ -312,6 +435,9 @@ class HDSATrainer:
 
     def _named_counts(self, counts) -> dict[str, list[float]]:
         return {self.id2label[idx]: [round(float(v), 4) for v in counts[idx]] for idx in sorted(self.id2label)}
+
+    def _select_metrics(self, metrics: dict, keys: list[str]) -> dict:
+        return {key: metrics[key] for key in keys if key in metrics}
 
     def _save_checkpoint(self, name: str, epoch: int, metrics: dict) -> None:
         torch.save(
@@ -366,6 +492,9 @@ class HDSATrainer:
             "loss_ce",
             "loss_proto",
             "loss_compact",
+            "loss_pair",
+            "loss_pair_anchor",
+            "loss_intensity",
             "ot_entropy_mean",
             "ot_entropy_max",
             "ot_max_prob_mean",
@@ -385,6 +514,10 @@ class HDSATrainer:
                 "loss_ce",
             ]:
                 fields.append(f"{split}_{key}")
+            for name in sorted(self.label2id):
+                fields.append(f"{split}_{name}_f1")
+            for src, dst in CONFUSION_LOG_PAIRS:
+                fields.append(f"{split}_confusion_{src}_to_{dst}")
         for key in [
             "same_anchor_sim_mean",
             "same_anchor_sim_max",
