@@ -41,7 +41,7 @@ class HDSAERCModel(nn.Module):
         self.classifier = nn.Linear(config.anchor_dim, config.num_classes)
         self.intensity_classifier = nn.Linear(config.anchor_dim, 3)
         anchors = self._load_or_init_anchors(config)
-        self.domain_anchors = nn.Parameter(F.normalize(anchors.float(), dim=-1))
+        self.register_buffer("domain_anchors", F.normalize(anchors.float(), dim=-1))
 
     def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, mask_pos: torch.Tensor) -> dict[str, torch.Tensor]:
         outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)

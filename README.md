@@ -6,8 +6,9 @@ The old CHDS implementation has been removed. The current code path is HDSA only
 
 1. Generate class-wise KMeans domain sub-anchors.
 2. Pretrain anchors on the hypersphere with inter/domain/rank/preserve losses.
-3. Train ERC with CE + OT-based prototype soft CE + compactness + confusion-pair losses.
-4. Update domain sub-anchors by class-adaptive EMA with fallback soft updates.
+3. Train ERC with CE + OT-based prototype soft CE + compactness loss.
+4. Update domain sub-anchors by high-confidence EMA according to OT assignments.
+5. Run confusion-related changes as small ablations, enabled one at a time from the command line.
 
 ## 1. Generate KMeans Domain Anchors
 
@@ -64,20 +65,7 @@ CUDA_VISIBLE_DEVICES=0 python src/run.py \
   --ot_sharpen_power 2.0 \
   --prototype_momentum 0.95 \
   --ema_conf_threshold 0.45 \
-  --class_adaptive_ema \
-  --default_ema_conf_threshold 0.45 \
-  --low_conf_classes angry,frustrated \
-  --low_conf_threshold 0.38 \
-  --happy_conf_threshold 0.42 \
-  --use_ema_fallback \
-  --fallback_momentum 0.98 \
-  --pair_loss_weight 0.1 \
-  --pair_margin 0.3 \
-  --pair_anchor_loss_weight 0.05 \
-  --pair_anchor_upper 0.20 \
-  --happy_ce_weight 1.3 \
-  --use_intensity_head \
-  --intensity_loss_weight 0.05
+  --experiment_name exp0_baseline
 ```
 
 ## Background Training
@@ -93,10 +81,20 @@ EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16" \
 bash scripts/run_hdsa_background.sh
 ```
 
-Recommended confusion-pair settings for the background script:
+Recommended stepwise ablations:
 
 ```bash
-EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16 --class_adaptive_ema --default_ema_conf_threshold 0.45 --low_conf_classes angry,frustrated --low_conf_threshold 0.38 --happy_conf_threshold 0.42 --use_ema_fallback --fallback_momentum 0.98 --pair_loss_weight 0.1 --pair_margin 0.3 --pair_anchor_loss_weight 0.05 --pair_anchor_upper 0.20 --happy_ce_weight 1.3 --use_intensity_head --intensity_loss_weight 0.05"
+# Exp0: anti-collapse baseline
+EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16 --experiment_name exp0_baseline"
+
+# Exp1: only class-adaptive EMA
+EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16 --experiment_name exp1_class_adaptive_ema --class_adaptive_ema --default_ema_conf_threshold 0.45 --low_conf_classes angry,frustrated --low_conf_threshold 0.40 --happy_conf_threshold 0.42"
+
+# Exp2: only weak pairwise confusion loss
+EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16 --experiment_name exp2_weak_pair --pair_loss_weight 0.03 --pair_margin 0.20"
+
+# Exp3: only light happy CE up-weighting
+EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16 --experiment_name exp3_happy_ce --happy_ce_weight 1.10"
 ```
 
 Watch progress:
@@ -115,9 +113,10 @@ Training writes:
 - `epoch_metrics.csv`
 - `metrics.jsonl`
 - `final_metrics.json`
+- `experiment_result.json`
 - `dev_classification_report.json`
 - `test_classification_report.json`
 - `dev_predictions.csv`
 - `test_predictions.csv`
 
-Every epoch logs `loss_total`, `loss_ce`, `loss_proto`, `loss_compact`, `loss_pair`, `loss_pair_anchor`, `loss_intensity`, dev/test metrics, per-class F1, target confusion-pair counts, anchor similarity stats, OT entropy/max-prob stats, OT assignment counts, and EMA update counts for each class.
+Every epoch logs `loss_total`, `loss_ce`, `loss_proto`, `loss_compact`, optional ablation losses, dev/test metrics, per-class F1, target confusion-pair counts, anchor similarity stats, OT entropy/max-prob stats, OT assignment counts, and EMA update counts for each class. By default, all confusion optimization modules are off so Exp0 reproduces the anti-collapse baseline.

@@ -123,14 +123,19 @@ class HDSATrainer:
         final_dev = self.evaluate(self.dev_loader, split_name="dev")
         final_test = self.evaluate(self.test_loader, split_name="test")
         final_summary = {
+            "experiment_name": self.args.experiment_name,
+            "active_ablations": getattr(self.args, "active_ablations", []),
+            "args": vars(self.args),
             "best_epoch": best_epoch,
             "best_dev_weighted_f1": best_dev,
             "best_epoch_test_metrics": best_test,
             "final_dev": final_dev,
             "final_test": final_test,
+            "final_anchor_stats": anchor_similarity_stats(self.model.get_anchors().detach().cpu()),
             "finished_at": _now(),
         }
         (self.output_dir / "final_metrics.json").write_text(json.dumps(final_summary, indent=2), encoding="utf-8")
+        (self.output_dir / "experiment_result.json").write_text(json.dumps(final_summary, indent=2), encoding="utf-8")
         self._append_text("\nTraining finished.")
         self._append_text(json.dumps(final_summary, indent=2))
 
@@ -216,7 +221,6 @@ class HDSATrainer:
             loss.backward()
             clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
             self.optimizer.step()
-            self.model.normalize_domain_anchors_()
             self.scheduler.step()
             ema_counts = self.model.ema_update_anchors_confident(
                 reps=z.detach(),
@@ -366,6 +370,7 @@ class HDSATrainer:
             csv.DictWriter(f, fieldnames=self._csv_fields()).writeheader()
         (self.output_dir / "epoch_results.txt").write_text(
             f"HDSA-ERC training started at {_now()}\n"
+            f"experiment_name: {self.args.experiment_name}\n"
             f"dataset_dir: {self.args.dataset_dir}\n"
             f"bert_path: {self.args.bert_path}\n"
             f"domain_anchor_path: {self.args.domain_anchor_path}\n",
