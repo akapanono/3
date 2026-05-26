@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+import csv
+import json
+from dataclasses import asdict
+from datetime import datetime
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+from sklearn.metrics import classification_report, confusion_matrix
+from torch.nn.utils import clip_grad_norm_
+from torch.utils.data import DataLoader
+
+from src.anchors.anchor_utils import anchor_similarity_stats
+from src.anchors.sinkhorn import ot_assign_by_class
+from src.metrics import classification_metrics
+from src.model import HDSAConfig, HDSAERCModel
+from src.model.hdsa_losses import compactness_loss, soft_cross_entropy
+
+
+class HDSATrainer:
+    def __init__(
+        self,
+        args,
+        model: HDSAERCModel,
+        train_loader: DataLoader,
+        dev_loader: DataLoader,
+        test_loader: DataLoader,
+        label2id: dict[str, int],
+        id2label: dict[int, str],
+    ):
+        self.args = args
+        self.model = model
+        self.train_loader = train_loader
+        self.dev_loader = dev_loader
+        self.test_loader = test_loader
+        self.label2id = label2id
+        self.id2label = id2label
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.output_dir = Path(args.output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.model.to(self.device)
+        self.optimizer = self._build_optimizer()
+        total_steps = max(1, len(train_loader) * args.epochs)
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=self._linear_warmup_decay(args.warmup_ratio, total_steps),
+        )
+
+    def train(self) -> None:
+        self._init_logs()
+        metadata = {
+            "args": vars(self.args),
+            "model_config": asdict(self.model.config),
+            "label2id": self.label2id,
+            "id2label": self.id2label,
+        }
+        (self.output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        best_dev = -1.0
+        best_epoch = 0
+        best_test = None
+        for epoch in range(1, self.args.epochs + 1):
+            self._append_text(f"\n[{_now()}] epoch {epoch}/{self.args.epochs} started")
+            train_stats = self._train_one_epoch()
+            dev_stats = self.evaluate(self.dev_loader)
+            test_stats = self.evaluate(self.test_loader)
+            row = {
+                "epoch": epoch,
+                "train": train_stats,
+                "dev": dev_stats,
+                "test": test_stats,
+                "anchor_stats": anchor_similarity_stats(self.model.get_anchors().detach().cpu()),
+                "ot_assignment_counts": self._named_counts(train_stats.pop("assignment_counts")),
+            }
+            self._write_epoch(row)
+            if dev_stats["weighted_f1"] > best_dev:
+                best_dev = dev_stats["weighted_f1"]
+                best_epoch = epoch
+                best_test = test_stats
+                self._save_checkpoint("best_model.pt", epoch, dev_stats)
+                self._append_text(f"[{_now()}] saved new best_model.pt at epoch {epoch}")
+        self._save_checkpoint("last_model.pt", self.args.epochs, test_stats)
+        final_dev = self.evaluate(self.dev_loader, split_name="dev")
+        final_test = self.evaluate(self.test_loader, split_name="test")
+        final_summary = {
+            "best_epoch": best_epoch,
+            "best_dev_weighted_f1": best_dev,
+            "best_epoch_test_metrics": best_test,
+            "final_dev": final_dev,
+            "final_test": final_test,
+            "finished_at": _now(),
+        }
+        (self.output_dir / "final_metrics.json").write_text(json.dumps(final_summary, indent=2), encoding="utf-8")
+        self._append_text("\nTraining finished.")
+        self._append_text(json.dumps(final_summary, indent=2))
+
+    def _train_one_epoch(self) -> dict:
+        self.model.train()
+        sums = {"loss_total": 0.0, "loss_ce": 0.0, "loss_proto": 0.0, "loss_compact": 0.0}
+        total = 0
+        total_counts = torch.zeros(
+            self.args.num_classes,
+            self.args.num_subanchors,
+            device=self.device,
+        )
+        for batch in self.train_loader:
+            labels = batch["labels"].to(self.device)
+            outputs = self.model(
+                input_ids=batch["input_ids"].to(self.device),
+                attention_mask=batch["attention_mask"].to(self.device),
+                mask_pos=batch["mask_pos"].to(self.device),
+            )
+            z = outputs["z"]
+            anchors = outputs["anchors"]
+            loss_ce = F.cross_entropy(outputs["logits"], labels)
+            soft_targets, assigned_anchor, assignment_counts = ot_assign_by_class(
+                reps=z.detach(),
+                labels=labels,
+                anchors=anchors.detach(),
+                epsilon=self.args.ot_epsilon,
+                n_iters=self.args.ot_iters,
+            )
+            flat_anchors = anchors.reshape(self.args.num_classes * self.args.num_subanchors, self.args.anchor_dim)
+            proto_logits = (z @ flat_anchors.t()) / self.args.proto_temperature
+            loss_proto = soft_cross_entropy(proto_logits, soft_targets)
+            loss_compact = compactness_loss(z, assigned_anchor.detach())
+            loss = loss_ce + self.args.proto_loss_weight * loss_proto + self.args.compact_loss_weight * loss_compact
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+            self.optimizer.step()
+            self.scheduler.step()
+            self.model.ema_update_anchors(
+                reps=z.detach(),
+                labels=labels,
+                soft_targets=soft_targets.detach(),
+                momentum=self.args.prototype_momentum,
+            )
+            bsz = labels.size(0)
+            total += bsz
+            total_counts += assignment_counts.detach()
+            sums["loss_total"] += float(loss.detach().cpu()) * bsz
+            sums["loss_ce"] += float(loss_ce.detach().cpu()) * bsz
+            sums["loss_proto"] += float(loss_proto.detach().cpu()) * bsz
+            sums["loss_compact"] += float(loss_compact.detach().cpu()) * bsz
+        out = {key: val / max(1, total) for key, val in sums.items()}
+        out["assignment_counts"] = total_counts.detach().cpu().tolist()
+        return out
+
+    @torch.no_grad()
+    def evaluate(self, loader: DataLoader, split_name: str | None = None) -> dict[str, float]:
+        self.model.eval()
+        y_true, y_pred, losses, sample_ids, texts = [], [], [], [], []
+        for batch in loader:
+            labels = batch["labels"].to(self.device)
+            outputs = self.model(
+                input_ids=batch["input_ids"].to(self.device),
+                attention_mask=batch["attention_mask"].to(self.device),
+                mask_pos=batch["mask_pos"].to(self.device),
+            )
+            losses.append(float(F.cross_entropy(outputs["logits"], labels).cpu()) * labels.size(0))
+            y_true.extend(labels.cpu().tolist())
+            y_pred.extend(outputs["logits"].argmax(dim=-1).cpu().tolist())
+            sample_ids.extend(ex.sample_id for ex in batch["examples"])
+            texts.extend(ex.text for ex in batch["examples"])
+        if not y_true:
+            return {
+                "accuracy": 0.0,
+                "macro_precision": 0.0,
+                "macro_recall": 0.0,
+                "macro_f1": 0.0,
+                "weighted_precision": 0.0,
+                "weighted_recall": 0.0,
+                "weighted_f1": 0.0,
+                "loss_ce": 0.0,
+            }
+        metrics = classification_metrics(y_true, y_pred)
+        metrics["loss_ce"] = sum(losses) / max(1, len(y_true))
+        if split_name:
+            self._save_detailed_eval(split_name, y_true, y_pred, sample_ids, texts)
+        return metrics
+
+    def _build_optimizer(self):
+        encoder_params, other_params = [], []
+        if self.args.freeze_encoder:
+            for param in self.model.encoder.parameters():
+                param.requires_grad = False
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if name.startswith("encoder."):
+                encoder_params.append(param)
+            else:
+                other_params.append(param)
+        return torch.optim.AdamW(
+            [
+                {"params": encoder_params, "lr": self.args.plm_lr},
+                {"params": other_params, "lr": self.args.other_lr},
+            ],
+            weight_decay=self.args.weight_decay,
+        )
+
+    def _linear_warmup_decay(self, warmup_ratio: float, total_steps: int):
+        warmup_steps = int(total_steps * warmup_ratio)
+
+        def lr_lambda(step: int) -> float:
+            if step < warmup_steps:
+                return float(step + 1) / float(max(1, warmup_steps))
+            return max(0.0, float(total_steps - step) / float(max(1, total_steps - warmup_steps)))
+
+        return lr_lambda
+
+    def _init_logs(self) -> None:
+        (self.output_dir / "metrics.jsonl").write_text("", encoding="utf-8")
+        with (self.output_dir / "epoch_metrics.csv").open("w", encoding="utf-8", newline="") as f:
+            csv.DictWriter(f, fieldnames=self._csv_fields()).writeheader()
+        (self.output_dir / "epoch_results.txt").write_text(
+            f"HDSA-ERC training started at {_now()}\n"
+            f"dataset_dir: {self.args.dataset_dir}\n"
+            f"bert_path: {self.args.bert_path}\n"
+            f"domain_anchor_path: {self.args.domain_anchor_path}\n",
+            encoding="utf-8",
+        )
+
+    def _write_epoch(self, row: dict) -> None:
+        with (self.output_dir / "metrics.jsonl").open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+            f.flush()
+        flat = {"epoch": row["epoch"]}
+        for split in ["train", "dev", "test"]:
+            for key, value in row[split].items():
+                flat[f"{split}_{key}"] = value
+        for key, value in row["anchor_stats"].items():
+            flat[f"anchor_{key}"] = value
+        with (self.output_dir / "epoch_metrics.csv").open("a", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self._csv_fields(), extrasaction="ignore")
+            writer.writerow(flat)
+            f.flush()
+        self._append_text(self._format_epoch(row))
+        print(json.dumps(row, indent=2), flush=True)
+
+    def _format_epoch(self, row: dict) -> str:
+        train, dev, test = row["train"], row["dev"], row["test"]
+        lines = [
+            f"[{_now()}] epoch {row['epoch']} finished",
+            (
+                f"  train loss_total={train['loss_total']:.6f} loss_ce={train['loss_ce']:.6f} "
+                f"loss_proto={train['loss_proto']:.6f} loss_compact={train['loss_compact']:.6f}"
+            ),
+            (
+                f"  dev  acc={dev['accuracy']:.6f} precision={dev['weighted_precision']:.6f} "
+                f"recall={dev['weighted_recall']:.6f} weighted_f1={dev['weighted_f1']:.6f} "
+                f"macro_f1={dev['macro_f1']:.6f}"
+            ),
+            (
+                f"  test acc={test['accuracy']:.6f} precision={test['weighted_precision']:.6f} "
+                f"recall={test['weighted_recall']:.6f} weighted_f1={test['weighted_f1']:.6f} "
+                f"macro_f1={test['macro_f1']:.6f}"
+            ),
+            f"  anchor_stats={row['anchor_stats']}",
+        ]
+        for label, counts in row["ot_assignment_counts"].items():
+            lines.append(f"  class {label} assignment: {counts}")
+        return "\n".join(lines)
+
+    def _append_text(self, text: str) -> None:
+        with (self.output_dir / "epoch_results.txt").open("a", encoding="utf-8") as f:
+            f.write(text.rstrip() + "\n")
+            f.flush()
+
+    def _named_counts(self, counts) -> dict[str, list[float]]:
+        return {self.id2label[idx]: [round(float(v), 4) for v in counts[idx]] for idx in sorted(self.id2label)}
+
+    def _save_checkpoint(self, name: str, epoch: int, metrics: dict) -> None:
+        torch.save(
+            {
+                "model_state_dict": self.model.state_dict(),
+                "model_config": asdict(self.model.config),
+                "args": vars(self.args),
+                "label2id": self.label2id,
+                "id2label": self.id2label,
+                "anchors": self.model.get_anchors().detach().cpu(),
+                "epoch": epoch,
+                "metrics": metrics,
+            },
+            self.output_dir / name,
+        )
+
+    def _save_detailed_eval(self, split_name: str, y_true, y_pred, sample_ids, texts) -> None:
+        labels = sorted(self.id2label)
+        target_names = [self.id2label[idx] for idx in labels]
+        report = classification_report(
+            y_true,
+            y_pred,
+            labels=labels,
+            target_names=target_names,
+            output_dict=True,
+            zero_division=0,
+        )
+        matrix = confusion_matrix(y_true, y_pred, labels=labels).tolist()
+        payload = {"classification_report": report, "confusion_matrix": {"labels": target_names, "matrix": matrix}}
+        (self.output_dir / f"{split_name}_classification_report.json").write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+        with (self.output_dir / f"{split_name}_predictions.csv").open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["sample_id", "gold", "pred", "correct", "text"])
+            writer.writeheader()
+            for sid, gold, pred, text in zip(sample_ids, y_true, y_pred, texts):
+                writer.writerow(
+                    {
+                        "sample_id": sid,
+                        "gold": self.id2label[int(gold)],
+                        "pred": self.id2label[int(pred)],
+                        "correct": int(gold == pred),
+                        "text": text,
+                    }
+                )
+
+    def _csv_fields(self) -> list[str]:
+        fields = ["epoch"]
+        for key in ["loss_total", "loss_ce", "loss_proto", "loss_compact"]:
+            fields.append(f"train_{key}")
+        for split in ["dev", "test"]:
+            for key in [
+                "accuracy",
+                "macro_precision",
+                "macro_recall",
+                "macro_f1",
+                "weighted_precision",
+                "weighted_recall",
+                "weighted_f1",
+                "loss_ce",
+            ]:
+                fields.append(f"{split}_{key}")
+        for key in [
+            "same_anchor_sim_mean",
+            "same_anchor_sim_max",
+            "diff_anchor_sim_mean",
+            "diff_anchor_sim_max",
+        ]:
+            fields.append(f"anchor_{key}")
+        return fields
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+

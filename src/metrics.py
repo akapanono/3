@@ -14,3 +14,4 @@ def classification_metrics(y_true: list[int] | np.ndarray, y_pred: list[int] | n
         "weighted_recall": float(recall_score(y_true, y_pred, average="weighted", zero_division=0)),
         "weighted_f1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
     }
+

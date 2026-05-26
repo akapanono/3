@@ -18,10 +18,14 @@ data/
 outputs/
 runs/
 checkpoints/
+domain_anchors/
+saved_models/
+pretrained/
 *.pt
 *.pth
 *.ckpt
 *.bin
+*.msgpack
 *.safetensors
 
 # Logs and process files
@@ -38,4 +42,3 @@ nature-skills-main/
 Thumbs.db
 .idea/
 .vscode/
-
