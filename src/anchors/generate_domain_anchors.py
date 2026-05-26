@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.anchors.anchor_utils import build_domain_anchors, default_dataset_dir, extract_representations
+from src.anchors.anchor_utils import anchor_similarity_stats, build_domain_anchors, default_dataset_dir, extract_representations
 from src.data import ERCCollator, ERCDataset, build_label_maps, load_erc_split
 from src.model import HDSAConfig, HDSAERCModel
 
@@ -63,8 +63,10 @@ def main() -> None:
         model.load_state_dict(state, strict=False)
     reps, labels = extract_representations(model, loader, device)
     anchors, counts = build_domain_anchors(reps, labels, len(label2id), args.num_subanchors, args.seed)
+    stats = anchor_similarity_stats(anchors)
     out = {
         "anchors": anchors,
+        "init_anchors": anchors.clone(),
         "counts": counts,
         "label2id": label2id,
         "id2label": id2label,
@@ -72,10 +74,14 @@ def main() -> None:
         "num_subanchors": args.num_subanchors,
         "model_config": asdict(config),
         "source": "class_wise_kmeans",
+        "kmeans_anchor_stats": stats,
     }
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, output_path)
+    print("KMeans anchor stats:")
+    for key, value in stats.items():
+        print(f"kmeans_{key}={value:.6f}")
     print(f"Saved KMeans domain anchors to {output_path}")
 
 

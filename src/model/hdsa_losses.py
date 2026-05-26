@@ -16,6 +16,19 @@ def compactness_loss(reps: torch.Tensor, assigned_anchor: torch.Tensor) -> torch
     return ((1.0 - cos) ** 2).mean()
 
 
+def sharpen_assignment(gamma: torch.Tensor, power: float = 2.0) -> torch.Tensor:
+    gamma = gamma.clamp_min(1e-12)
+    gamma = gamma**power
+    return gamma / gamma.sum(dim=1, keepdim=True).clamp_min(1e-12)
+
+
+def anchor_preserve_loss(anchors: torch.Tensor, init_anchors: torch.Tensor) -> torch.Tensor:
+    anchors = F.normalize(anchors, dim=-1)
+    init_anchors = F.normalize(init_anchors.to(anchors.device), dim=-1)
+    sim = (anchors * init_anchors).sum(dim=-1)
+    return (1.0 - sim).mean()
+
+
 def anchor_inter_loss(anchors: torch.Tensor) -> torch.Tensor:
     c, m, d = anchors.shape
     if c <= 1:
@@ -32,23 +45,26 @@ def anchor_inter_loss(anchors: torch.Tensor) -> torch.Tensor:
 def anchor_domain_loss(
     anchors: torch.Tensor,
     same_upper: float = 0.90,
-    div_weight: float = 0.5,
-) -> torch.Tensor:
+    center_weight: float = 0.1,
+    div_weight: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     c, m, d = anchors.shape
     anchors = F.normalize(anchors, dim=-1)
     centers = F.normalize(anchors.mean(dim=1), dim=-1)
     center_sim = torch.einsum("cmd,cd->cm", anchors, centers)
     loss_center = (1.0 - center_sim).mean()
     if m <= 1:
-        return loss_center
-    flat = anchors.reshape(c * m, d)
-    sim = flat @ flat.t()
-    labels = torch.arange(c, device=anchors.device).repeat_interleave(m)
-    same_mask = labels[:, None] == labels[None, :]
-    eye = torch.eye(c * m, dtype=torch.bool, device=anchors.device)
-    same_sim = sim[same_mask & ~eye]
-    loss_div = F.relu(same_sim - same_upper).mean() if same_sim.numel() else anchors.new_tensor(0.0)
-    return loss_center + div_weight * loss_div
+        loss_div = anchors.new_tensor(0.0)
+    else:
+        flat = anchors.reshape(c * m, d)
+        sim = flat @ flat.t()
+        labels = torch.arange(c, device=anchors.device).repeat_interleave(m)
+        same_mask = labels[:, None] == labels[None, :]
+        eye = torch.eye(c * m, dtype=torch.bool, device=anchors.device)
+        same_sim = sim[same_mask & ~eye]
+        loss_div = F.relu(same_sim - same_upper).mean() if same_sim.numel() else anchors.new_tensor(0.0)
+    loss_domain = center_weight * loss_center + div_weight * loss_div
+    return loss_domain, loss_center, loss_div
 
 
 def anchor_rank_loss(anchors: torch.Tensor, label_embeddings: torch.Tensor) -> torch.Tensor:

@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.anchors.anchor_utils import anchor_similarity_stats, build_label_embeddings
-from src.model.hdsa_losses import anchor_domain_loss, anchor_inter_loss, anchor_rank_loss
+from src.model.hdsa_losses import anchor_domain_loss, anchor_inter_loss, anchor_preserve_loss, anchor_rank_loss
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,9 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor_pretrain_epochs", type=int, default=1000)
     parser.add_argument("--anchor_pretrain_lr", type=float, default=0.1)
     parser.add_argument("--domain_weight", type=float, default=1.0)
+    parser.add_argument("--center_weight", type=float, default=0.1)
+    parser.add_argument("--div_weight", type=float, default=1.0)
+    parser.add_argument("--preserve_weight", type=float, default=0.5)
     parser.add_argument("--rank_weight", type=float, default=1.0)
     parser.add_argument("--same_upper", type=float, default=0.90)
-    parser.add_argument("--div_weight", type=float, default=0.5)
     parser.add_argument("--log_every", type=int, default=100)
     return parser.parse_args()
 
@@ -43,9 +45,20 @@ def main() -> None:
     for step in range(1, args.anchor_pretrain_epochs + 1):
         norm_anchors = F.normalize(anchors, dim=-1)
         loss_inter = anchor_inter_loss(norm_anchors)
-        loss_domain = anchor_domain_loss(norm_anchors, same_upper=args.same_upper, div_weight=args.div_weight)
+        loss_domain, loss_center, loss_div = anchor_domain_loss(
+            norm_anchors,
+            same_upper=args.same_upper,
+            center_weight=args.center_weight,
+            div_weight=args.div_weight,
+        )
         loss_rank = anchor_rank_loss(norm_anchors, label_embeddings)
-        loss = loss_inter + args.domain_weight * loss_domain + args.rank_weight * loss_rank
+        loss_preserve = anchor_preserve_loss(norm_anchors, init_anchors)
+        loss = (
+            loss_inter
+            + args.domain_weight * loss_domain
+            + args.rank_weight * loss_rank
+            + args.preserve_weight * loss_preserve
+        )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -54,21 +67,28 @@ def main() -> None:
         if step == 1 or step % args.log_every == 0 or step == args.anchor_pretrain_epochs:
             print(
                 f"step={step} loss={loss.item():.6f} inter={loss_inter.item():.6f} "
-                f"domain={loss_domain.item():.6f} rank={loss_rank.item():.6f}"
+                f"domain={loss_domain.item():.6f} center={loss_center.item():.6f} "
+                f"div={loss_div.item():.6f} rank={loss_rank.item():.6f} "
+                f"preserve={loss_preserve.item():.6f}"
             )
+    final_stats = anchor_similarity_stats(anchors.detach().cpu())
     out = dict(obj) if isinstance(obj, dict) else {}
     out.update(
         {
             "anchors": F.normalize(anchors.detach().cpu(), dim=-1),
+            "init_anchors": F.normalize(init_anchors.detach().cpu(), dim=-1),
             "label_embeddings": label_embeddings.cpu(),
             "args": vars(args),
             "source": "kmeans_init_plus_hyperspherical_pretrain",
-            "anchor_stats": anchor_similarity_stats(anchors.detach().cpu()),
+            "anchor_stats": final_stats,
         }
     )
     output_path = Path(args.output_anchor_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(out, output_path)
+    print("Pretrained anchor stats:")
+    for key, value in final_stats.items():
+        print(f"pretrain_{key}={value:.6f}")
     print(f"Saved hyperspherical domain anchors to {output_path}")
 
 

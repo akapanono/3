@@ -14,13 +14,13 @@ ENV/
 conda-meta/
 
 # Training data and generated artifacts
-data/
-outputs/
-runs/
-checkpoints/
-domain_anchors/
-saved_models/
-pretrained/
+/data/
+/outputs/
+/runs/
+/checkpoints/
+/domain_anchors/
+/saved_models/
+/pretrained/
 *.pt
 *.pth
 *.ckpt

@@ -16,7 +16,7 @@ from src.anchors.anchor_utils import anchor_similarity_stats
 from src.anchors.sinkhorn import ot_assign_by_class
 from src.metrics import classification_metrics
 from src.model import HDSAConfig, HDSAERCModel
-from src.model.hdsa_losses import compactness_loss, soft_cross_entropy
+from src.model.hdsa_losses import compactness_loss, sharpen_assignment, soft_cross_entropy
 
 
 class HDSATrainer:
@@ -65,13 +65,16 @@ class HDSATrainer:
             train_stats = self._train_one_epoch()
             dev_stats = self.evaluate(self.dev_loader)
             test_stats = self.evaluate(self.test_loader)
+            assignment_counts = train_stats.pop("assignment_counts")
+            ema_update_counts = train_stats.pop("ema_update_counts")
             row = {
                 "epoch": epoch,
                 "train": train_stats,
                 "dev": dev_stats,
                 "test": test_stats,
                 "anchor_stats": anchor_similarity_stats(self.model.get_anchors().detach().cpu()),
-                "ot_assignment_counts": self._named_counts(train_stats.pop("assignment_counts")),
+                "ot_assignment_counts": self._named_counts(assignment_counts),
+                "ema_update_counts": self._named_counts(ema_update_counts),
             }
             self._write_epoch(row)
             if dev_stats["weighted_f1"] > best_dev:
@@ -97,13 +100,24 @@ class HDSATrainer:
 
     def _train_one_epoch(self) -> dict:
         self.model.train()
-        sums = {"loss_total": 0.0, "loss_ce": 0.0, "loss_proto": 0.0, "loss_compact": 0.0}
+        sums = {
+            "loss_total": 0.0,
+            "loss_ce": 0.0,
+            "loss_proto": 0.0,
+            "loss_compact": 0.0,
+            "ot_entropy_mean": 0.0,
+            "ot_entropy_max": 0.0,
+            "ot_max_prob_mean": 0.0,
+            "ot_max_prob_min": 0.0,
+            "ot_max_prob_max": 0.0,
+        }
         total = 0
         total_counts = torch.zeros(
             self.args.num_classes,
             self.args.num_subanchors,
             device=self.device,
         )
+        total_ema_counts = torch.zeros_like(total_counts)
         for batch in self.train_loader:
             labels = batch["labels"].to(self.device)
             outputs = self.model(
@@ -114,7 +128,7 @@ class HDSATrainer:
             z = outputs["z"]
             anchors = outputs["anchors"]
             loss_ce = F.cross_entropy(outputs["logits"], labels)
-            soft_targets, assigned_anchor, assignment_counts = ot_assign_by_class(
+            soft_targets, assigned_anchor, assignment_counts, ot_stats = ot_assign_by_class(
                 reps=z.detach(),
                 labels=labels,
                 anchors=anchors.detach(),
@@ -123,7 +137,8 @@ class HDSATrainer:
             )
             flat_anchors = anchors.reshape(self.args.num_classes * self.args.num_subanchors, self.args.anchor_dim)
             proto_logits = (z @ flat_anchors.t()) / self.args.proto_temperature
-            loss_proto = soft_cross_entropy(proto_logits, soft_targets)
+            soft_targets_for_loss = sharpen_assignment(soft_targets, power=self.args.ot_sharpen_power)
+            loss_proto = soft_cross_entropy(proto_logits, soft_targets_for_loss)
             loss_compact = compactness_loss(z, assigned_anchor.detach())
             loss = loss_ce + self.args.proto_loss_weight * loss_proto + self.args.compact_loss_weight * loss_compact
             self.optimizer.zero_grad(set_to_none=True)
@@ -131,21 +146,36 @@ class HDSATrainer:
             clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
             self.optimizer.step()
             self.scheduler.step()
-            self.model.ema_update_anchors(
+            ema_counts = self.model.ema_update_anchors_confident(
                 reps=z.detach(),
                 labels=labels,
                 soft_targets=soft_targets.detach(),
                 momentum=self.args.prototype_momentum,
+                threshold=self.args.ema_conf_threshold,
             )
             bsz = labels.size(0)
             total += bsz
             total_counts += assignment_counts.detach()
+            total_ema_counts += ema_counts.detach()
             sums["loss_total"] += float(loss.detach().cpu()) * bsz
             sums["loss_ce"] += float(loss_ce.detach().cpu()) * bsz
             sums["loss_proto"] += float(loss_proto.detach().cpu()) * bsz
             sums["loss_compact"] += float(loss_compact.detach().cpu()) * bsz
+            sums["ot_entropy_mean"] += ot_stats["ot_entropy_mean"] * bsz
+            sums["ot_entropy_max"] = max(sums["ot_entropy_max"], ot_stats["ot_entropy_max"])
+            sums["ot_max_prob_mean"] += ot_stats["ot_max_prob_mean"] * bsz
+            sums["ot_max_prob_min"] = (
+                ot_stats["ot_max_prob_min"]
+                if total == bsz
+                else min(sums["ot_max_prob_min"], ot_stats["ot_max_prob_min"])
+            )
+            sums["ot_max_prob_max"] = max(sums["ot_max_prob_max"], ot_stats["ot_max_prob_max"])
         out = {key: val / max(1, total) for key, val in sums.items()}
+        out["ot_entropy_max"] = sums["ot_entropy_max"]
+        out["ot_max_prob_min"] = sums["ot_max_prob_min"]
+        out["ot_max_prob_max"] = sums["ot_max_prob_max"]
         out["assignment_counts"] = total_counts.detach().cpu().tolist()
+        out["ema_update_counts"] = total_ema_counts.detach().cpu().tolist()
         return out
 
     @torch.no_grad()
@@ -222,6 +252,10 @@ class HDSATrainer:
             f"domain_anchor_path: {self.args.domain_anchor_path}\n",
             encoding="utf-8",
         )
+        loaded_stats = anchor_similarity_stats(self.model.get_anchors().detach().cpu())
+        self._append_text("Loaded anchor stats:")
+        for key, value in loaded_stats.items():
+            self._append_text(f"loaded_{key}={value:.6f}")
 
     def _write_epoch(self, row: dict) -> None:
         with (self.output_dir / "metrics.jsonl").open("a", encoding="utf-8") as f:
@@ -249,6 +283,11 @@ class HDSATrainer:
                 f"loss_proto={train['loss_proto']:.6f} loss_compact={train['loss_compact']:.6f}"
             ),
             (
+                f"  ot entropy_mean={train['ot_entropy_mean']:.6f} entropy_max={train['ot_entropy_max']:.6f} "
+                f"max_prob_mean={train['ot_max_prob_mean']:.6f} "
+                f"max_prob_min={train['ot_max_prob_min']:.6f} max_prob_max={train['ot_max_prob_max']:.6f}"
+            ),
+            (
                 f"  dev  acc={dev['accuracy']:.6f} precision={dev['weighted_precision']:.6f} "
                 f"recall={dev['weighted_recall']:.6f} weighted_f1={dev['weighted_f1']:.6f} "
                 f"macro_f1={dev['macro_f1']:.6f}"
@@ -262,6 +301,8 @@ class HDSATrainer:
         ]
         for label, counts in row["ot_assignment_counts"].items():
             lines.append(f"  class {label} assignment: {counts}")
+        for label, counts in row["ema_update_counts"].items():
+            lines.append(f"  class {label} ema_update: {counts}")
         return "\n".join(lines)
 
     def _append_text(self, text: str) -> None:
@@ -320,7 +361,17 @@ class HDSATrainer:
 
     def _csv_fields(self) -> list[str]:
         fields = ["epoch"]
-        for key in ["loss_total", "loss_ce", "loss_proto", "loss_compact"]:
+        for key in [
+            "loss_total",
+            "loss_ce",
+            "loss_proto",
+            "loss_compact",
+            "ot_entropy_mean",
+            "ot_entropy_max",
+            "ot_max_prob_mean",
+            "ot_max_prob_min",
+            "ot_max_prob_max",
+        ]:
             fields.append(f"train_{key}")
         for split in ["dev", "test"]:
             for key in [

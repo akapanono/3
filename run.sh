@@ -15,8 +15,13 @@ python src/run.py \
   --anchor_logit_weight 0.3 \
   --proto_loss_weight 0.5 \
   --compact_loss_weight 0.1 \
-  --ot_epsilon 0.05 \
+  --center_weight 0.1 \
+  --div_weight 1.0 \
+  --preserve_weight 0.5 \
+  --same_upper 0.90 \
+  --ot_epsilon 0.02 \
   --ot_iters 50 \
-  --prototype_momentum 0.9 \
+  --ot_sharpen_power 2.0 \
+  --prototype_momentum 0.95 \
+  --ema_conf_threshold 0.45 \
   "$@"
-

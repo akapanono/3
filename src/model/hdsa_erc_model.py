@@ -72,31 +72,40 @@ class HDSAERCModel(nn.Module):
         }
 
     @torch.no_grad()
-    def ema_update_anchors(
+    def ema_update_anchors_confident(
         self,
         reps: torch.Tensor,
         labels: torch.Tensor,
         soft_targets: torch.Tensor,
-        momentum: float = 0.9,
-    ) -> None:
+        momentum: float = 0.95,
+        threshold: float = 0.45,
+    ) -> torch.Tensor:
         cnum, mnum, _ = self.domain_anchors.shape
         reps = F.normalize(reps.detach(), dim=-1)
         target = soft_targets.detach().reshape(-1, cnum, mnum)
+        update_counts = torch.zeros(cnum, mnum, device=reps.device)
         for cls in range(cnum):
             idx = torch.where(labels == cls)[0]
             if idx.numel() == 0:
                 continue
             z_cls = reps[idx]
             gamma_cls = target[idx, cls]
+            max_prob, hard_sub = gamma_cls.max(dim=1)
+            keep = max_prob >= threshold
+            if keep.sum().item() == 0:
+                continue
+            z_keep = z_cls[keep]
+            sub_keep = hard_sub[keep]
             for sub in range(mnum):
-                weight = gamma_cls[:, sub]
-                mass = weight.sum()
-                if mass.item() <= 1e-6:
+                sub_idx = torch.where(sub_keep == sub)[0]
+                if sub_idx.numel() == 0:
                     continue
-                mean = F.normalize((weight[:, None] * z_cls).sum(dim=0) / mass, dim=-1)
+                mean = F.normalize(z_keep[sub_idx].mean(dim=0), dim=-1)
                 old = self.domain_anchors[cls, sub]
                 new = momentum * old + (1.0 - momentum) * mean
                 self.domain_anchors[cls, sub] = F.normalize(new, dim=-1)
+                update_counts[cls, sub] += sub_idx.numel()
+        return update_counts
 
     def _load_or_init_anchors(self, config: HDSAConfig) -> torch.Tensor:
         if config.domain_anchor_path:

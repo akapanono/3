@@ -5,7 +5,7 @@ This project implements **Hyperspherical Domain Sub-anchor with Optimal Transpor
 The old CHDS implementation has been removed. The current code path is HDSA only:
 
 1. Generate class-wise KMeans domain sub-anchors.
-2. Pretrain anchors on the hypersphere with inter/domain/rank losses.
+2. Pretrain anchors on the hypersphere with inter/domain/rank/preserve losses.
 3. Train ERC with CE + OT-based prototype soft CE + compactness loss.
 4. Update domain sub-anchors by EMA according to OT assignments.
 
@@ -31,7 +31,10 @@ python src/anchors/pretrain_hyp_domain_anchors.py \
   --anchor_pretrain_epochs 1000 \
   --anchor_pretrain_lr 0.1 \
   --domain_weight 1.0 \
+  --center_weight 0.1 \
+  --div_weight 1.0 \
   --rank_weight 1.0 \
+  --preserve_weight 0.5 \
   --same_upper 0.90
 ```
 
@@ -52,9 +55,15 @@ CUDA_VISIBLE_DEVICES=0 python src/run.py \
   --anchor_logit_weight 0.3 \
   --proto_loss_weight 0.5 \
   --compact_loss_weight 0.1 \
-  --ot_epsilon 0.05 \
+  --center_weight 0.1 \
+  --div_weight 1.0 \
+  --preserve_weight 0.5 \
+  --same_upper 0.90 \
+  --ot_epsilon 0.02 \
   --ot_iters 50 \
-  --prototype_momentum 0.9
+  --ot_sharpen_power 2.0 \
+  --prototype_momentum 0.95 \
+  --ema_conf_threshold 0.45
 ```
 
 ## Background Training
@@ -91,5 +100,4 @@ Training writes:
 - `dev_predictions.csv`
 - `test_predictions.csv`
 
-Every epoch logs `loss_total`, `loss_ce`, `loss_proto`, `loss_compact`, dev/test metrics, anchor similarity stats, and OT assignment counts for each class.
-
+Every epoch logs `loss_total`, `loss_ce`, `loss_proto`, `loss_compact`, dev/test metrics, anchor similarity stats, OT entropy/max-prob stats, OT assignment counts, and high-confidence EMA update counts for each class.
