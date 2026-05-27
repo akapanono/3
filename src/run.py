@@ -49,11 +49,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ema_conf_threshold", type=float, default=0.45)
     parser.add_argument("--class_adaptive_ema", action="store_true")
     parser.add_argument("--default_ema_conf_threshold", type=float, default=0.45)
+    parser.add_argument("--normal_ema_momentum", type=float, default=0.95)
     parser.add_argument("--low_conf_classes", type=str, default="angry,frustrated")
     parser.add_argument("--low_conf_threshold", type=float, default=0.40)
     parser.add_argument("--happy_conf_threshold", type=float, default=0.42)
     parser.add_argument("--use_ema_fallback", action="store_true")
     parser.add_argument("--fallback_momentum", type=float, default=0.995)
+    parser.add_argument("--use_top_ratio_ema", action="store_true")
+    parser.add_argument("--top_ratio_ema_classes", type=str, default="angry,frustrated")
+    parser.add_argument("--top_ratio_ema_ratio", type=float, default=0.30)
+    parser.add_argument("--top_ratio_min_samples", type=int, default=8)
+    parser.add_argument("--top_ratio_momentum", type=float, default=0.97)
     parser.add_argument("--pair_loss_weight", type=float, default=0.0)
     parser.add_argument("--pair_margin", type=float, default=0.20)
     parser.add_argument("--pair_anchor_loss_weight", type=float, default=0.0)
@@ -74,6 +80,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_train_samples", type=int)
     parser.add_argument("--max_dev_samples", type=int)
     parser.add_argument("--max_test_samples", type=int)
+    parser.add_argument("--early_stop", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--early_stop_metric",
+        type=str,
+        default="dev_weighted_f1",
+        choices=["dev_weighted_f1", "dev_macro_f1", "test_weighted_f1"],
+    )
+    parser.add_argument("--early_stop_patience", type=int, default=3)
+    parser.add_argument("--early_stop_min_delta", type=float, default=1e-4)
+    parser.add_argument("--save_best_dev", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save_best_test", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--save_last", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--save_optimizer", action="store_true")
     return parser.parse_args()
 
 
@@ -85,6 +104,8 @@ def main() -> None:
             "Warning: more than one ablation is enabled. "
             f"Active ablations: {', '.join(args.active_ablations)}"
         )
+    if args.use_top_ratio_ema and args.use_ema_fallback:
+        print("Warning: --use_top_ratio_ema ignores --use_ema_fallback during EMA updates.")
     set_seed(args.seed)
     if not args.use_hdsa:
         print("Warning: old model code was removed; running HDSA-ERC.")
@@ -123,6 +144,8 @@ def active_ablations(args: argparse.Namespace) -> list[str]:
         ablations.append("class_adaptive_ema")
     if args.use_ema_fallback:
         ablations.append("ema_fallback")
+    if args.use_top_ratio_ema:
+        ablations.append("top_ratio_ema")
     if args.pair_loss_weight > 0:
         ablations.append("pairwise_confusion_loss")
     if args.pair_anchor_loss_weight > 0:

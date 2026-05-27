@@ -65,7 +65,20 @@ CUDA_VISIBLE_DEVICES=0 python src/run.py \
   --ot_sharpen_power 2.0 \
   --prototype_momentum 0.95 \
   --ema_conf_threshold 0.45 \
-  --experiment_name exp0_baseline
+  --default_ema_conf_threshold 0.45 \
+  --normal_ema_momentum 0.95 \
+  --use_top_ratio_ema \
+  --top_ratio_ema_classes angry,frustrated \
+  --top_ratio_ema_ratio 0.30 \
+  --top_ratio_min_samples 8 \
+  --top_ratio_momentum 0.97 \
+  --early_stop \
+  --early_stop_metric dev_weighted_f1 \
+  --early_stop_patience 3 \
+  --early_stop_min_delta 0.0001 \
+  --save_best_dev \
+  --save_best_test \
+  --experiment_name exp1_top_ratio_ema
 ```
 
 ## Background Training
@@ -77,7 +90,7 @@ DATASET_DIR=data/IEMOCAP \
 BERT_PATH=pretrained/sup-simcse-roberta-large \
 DOMAIN_ANCHOR_PATH=domain_anchors/IEMOCAP_M3_hyp.pt \
 OUTPUT_DIR=outputs/hdsa_erc_iemocap \
-EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16" \
+EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16 --use_top_ratio_ema --top_ratio_ema_classes angry,frustrated --top_ratio_ema_ratio 0.30 --top_ratio_min_samples 8 --top_ratio_momentum 0.97 --early_stop --early_stop_metric dev_weighted_f1 --early_stop_patience 3 --save_best_dev --save_best_test --experiment_name exp1_top_ratio_ema" \
 bash scripts/run_hdsa_background.sh
 ```
 
@@ -107,8 +120,9 @@ tail -f outputs/hdsa_erc_iemocap/epoch_results.txt
 
 Training writes:
 
-- `best_model.pt`
-- `last_model.pt`
+- `best_dev_model.pt`
+- `best_test_model.pt`
+- `last_model.pt` only when `--save_last` is enabled
 - `epoch_results.txt`
 - `epoch_metrics.csv`
 - `metrics.jsonl`
@@ -119,4 +133,4 @@ Training writes:
 - `dev_predictions.csv`
 - `test_predictions.csv`
 
-Every epoch logs `loss_total`, `loss_ce`, `loss_proto`, `loss_compact`, optional ablation losses, dev/test metrics, per-class F1, target confusion-pair counts, anchor similarity stats, OT entropy/max-prob stats, OT assignment counts, and EMA update counts for each class. By default, all confusion optimization modules are off so Exp0 reproduces the anti-collapse baseline.
+Every epoch logs `loss_total`, `loss_ce`, `loss_proto`, `loss_compact`, optional ablation losses, dev/test metrics, per-class F1, target confusion-pair counts, anchor similarity stats, OT entropy/max-prob stats, OT assignment counts, hard assignment counts, class-wise OT max-prob quantiles, EMA update counts, and current best dev/test summaries. By default, all confusion optimization modules are off so Exp0 reproduces the anti-collapse baseline; enable `--use_top_ratio_ema` for the angry/frustrated top-ratio hard EMA update.

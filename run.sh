@@ -24,4 +24,17 @@ python src/run.py \
   --ot_sharpen_power 2.0 \
   --prototype_momentum 0.95 \
   --ema_conf_threshold 0.45 \
+  --default_ema_conf_threshold 0.45 \
+  --normal_ema_momentum 0.95 \
+  --use_top_ratio_ema \
+  --top_ratio_ema_classes angry,frustrated \
+  --top_ratio_ema_ratio 0.30 \
+  --top_ratio_min_samples 8 \
+  --top_ratio_momentum 0.97 \
+  --early_stop \
+  --early_stop_metric dev_weighted_f1 \
+  --early_stop_patience 3 \
+  --early_stop_min_delta 0.0001 \
+  --save_best_dev \
+  --save_best_test \
   "$@"

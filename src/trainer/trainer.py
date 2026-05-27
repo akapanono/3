@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -82,6 +83,7 @@ class HDSATrainer:
         )
         self.ce_weights = self._build_ce_weights().to(self.device)
         self.class_thresholds = self._build_class_thresholds().to(self.device) if args.class_adaptive_ema else None
+        self.top_ratio_class_ids = self._build_top_ratio_class_ids(args.top_ratio_ema_classes)
         self.intensity_targets_by_class = self._build_intensity_targets().to(self.device)
 
     def train(self) -> None:
@@ -93,16 +95,59 @@ class HDSATrainer:
             "id2label": self.id2label,
         }
         (self.output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        best_dev = -1.0
-        best_epoch = 0
-        best_test = None
+        best_dev_weighted_f1 = -1.0
+        best_test_weighted_f1 = -1.0
+        best_metric = -1.0
+        bad_epochs = 0
+        best_dev_epoch = -1
+        best_test_epoch = -1
+        test_at_best_dev = None
+        best_dev_metrics = None
+        best_test_metrics = None
+        last_epoch = 0
         for epoch in range(1, self.args.epochs + 1):
+            last_epoch = epoch
             self._append_text(f"\n[{_now()}] epoch {epoch}/{self.args.epochs} started")
             train_stats = self._train_one_epoch()
             dev_stats = self.evaluate(self.dev_loader)
             test_stats = self.evaluate(self.test_loader)
             assignment_counts = train_stats.pop("assignment_counts")
             ema_update_counts = train_stats.pop("ema_update_counts")
+            hard_assignment_counts = train_stats.pop("hard_assignment_counts")
+            class_ot_max_prob = train_stats.pop("class_ot_max_prob")
+            dev_wf1 = dev_stats["weighted_f1"]
+            test_wf1 = test_stats["weighted_f1"]
+            if dev_wf1 > best_dev_weighted_f1 + self.args.early_stop_min_delta:
+                best_dev_weighted_f1 = dev_wf1
+                best_dev_epoch = epoch
+                test_at_best_dev = test_wf1
+                best_dev_metrics = {"dev": dev_stats, "test": test_stats}
+                if self.args.save_best_dev:
+                    self._save_checkpoint("best_dev_model.pt", epoch, best_dev_metrics)
+                    self._append_text(f"[{_now()}] saved new best_dev_model.pt at epoch {epoch}")
+            if test_wf1 > best_test_weighted_f1 + self.args.early_stop_min_delta:
+                best_test_weighted_f1 = test_wf1
+                best_test_epoch = epoch
+                best_test_metrics = {"dev": dev_stats, "test": test_stats}
+                if self.args.save_best_test:
+                    self._save_checkpoint("best_test_model.pt", epoch, best_test_metrics)
+                    self._append_text(f"[{_now()}] saved new best_test_model.pt at epoch {epoch}")
+            current_metric = self._early_stop_metric(dev_stats, test_stats)
+            if current_metric > best_metric + self.args.early_stop_min_delta:
+                best_metric = current_metric
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+            best_row = {
+                "best_dev_epoch": best_dev_epoch,
+                "best_dev_weighted_f1": best_dev_weighted_f1,
+                "test_at_best_dev": test_at_best_dev,
+                "best_test_epoch": best_test_epoch,
+                "best_test_weighted_f1": best_test_weighted_f1,
+                "early_stop_metric": self.args.early_stop_metric,
+                "best_early_stop_metric": best_metric,
+                "bad_epochs": bad_epochs,
+            }
             row = {
                 "epoch": epoch,
                 "train": train_stats,
@@ -110,25 +155,33 @@ class HDSATrainer:
                 "test": test_stats,
                 "anchor_stats": anchor_similarity_stats(self.model.get_anchors().detach().cpu()),
                 "ot_assignment_counts": self._named_counts(assignment_counts),
+                "hard_assignment_counts": self._named_counts(hard_assignment_counts),
                 "ema_update_counts": self._named_counts(ema_update_counts),
+                "class_ot_max_prob": self._named_stats(class_ot_max_prob),
+                "best": best_row,
             }
             self._write_epoch(row)
-            if dev_stats["weighted_f1"] > best_dev:
-                best_dev = dev_stats["weighted_f1"]
-                best_epoch = epoch
-                best_test = test_stats
-                self._save_checkpoint("best_model.pt", epoch, dev_stats)
-                self._append_text(f"[{_now()}] saved new best_model.pt at epoch {epoch}")
-        self._save_checkpoint("last_model.pt", self.args.epochs, test_stats)
+            if self.args.early_stop and bad_epochs >= self.args.early_stop_patience:
+                self._append_text(
+                    f"[{_now()}] Early stopping at epoch {epoch}. "
+                    f"Best {self.args.early_stop_metric}: {best_metric:.6f}"
+                )
+                break
+        if self.args.save_last:
+            self._save_checkpoint("last_model.pt", last_epoch, {"dev": dev_stats, "test": test_stats})
         final_dev = self.evaluate(self.dev_loader, split_name="dev")
         final_test = self.evaluate(self.test_loader, split_name="test")
         final_summary = {
             "experiment_name": self.args.experiment_name,
             "active_ablations": getattr(self.args, "active_ablations", []),
             "args": vars(self.args),
-            "best_epoch": best_epoch,
-            "best_dev_weighted_f1": best_dev,
-            "best_epoch_test_metrics": best_test,
+            "best_dev_epoch": best_dev_epoch,
+            "best_dev_weighted_f1": best_dev_weighted_f1,
+            "test_at_best_dev": test_at_best_dev,
+            "best_dev_metrics": best_dev_metrics,
+            "best_test_epoch": best_test_epoch,
+            "best_test_weighted_f1": best_test_weighted_f1,
+            "best_test_metrics": best_test_metrics,
             "final_dev": final_dev,
             "final_test": final_test,
             "final_anchor_stats": anchor_similarity_stats(self.model.get_anchors().detach().cpu()),
@@ -162,6 +215,8 @@ class HDSATrainer:
             device=self.device,
         )
         total_ema_counts = torch.zeros_like(total_counts)
+        total_hard_counts = torch.zeros_like(total_counts)
+        max_probs_by_class: dict[int, list[torch.Tensor]] = {idx: [] for idx in range(self.args.num_classes)}
         for batch in self.train_loader:
             labels = batch["labels"].to(self.device)
             outputs = self.model(
@@ -179,6 +234,7 @@ class HDSATrainer:
                 epsilon=self.args.ot_epsilon,
                 n_iters=self.args.ot_iters,
             )
+            hard_counts, batch_max_probs = self._ot_hard_diagnostics(labels, soft_targets.detach())
             flat_anchors = anchors.reshape(self.args.num_classes * self.args.num_subanchors, self.args.anchor_dim)
             proto_logits = (z @ flat_anchors.t()) / self.args.proto_temperature
             soft_targets_for_loss = sharpen_assignment(soft_targets, power=self.args.ot_sharpen_power)
@@ -222,20 +278,36 @@ class HDSATrainer:
             clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
             self.optimizer.step()
             self.scheduler.step()
-            ema_counts = self.model.ema_update_anchors_confident(
-                reps=z.detach(),
-                labels=labels,
-                soft_targets=soft_targets.detach(),
-                momentum=self.args.prototype_momentum,
-                threshold=self.args.ema_conf_threshold,
-                class_thresholds=self.class_thresholds,
-                use_fallback=self.args.use_ema_fallback,
-                fallback_momentum=self.args.fallback_momentum,
-            )
+            if self.args.use_top_ratio_ema:
+                ema_counts = self.model.ema_update_anchors_top_ratio(
+                    reps=z.detach(),
+                    labels=labels,
+                    soft_targets=soft_targets.detach(),
+                    top_ratio_class_ids=self.top_ratio_class_ids,
+                    top_ratio=self.args.top_ratio_ema_ratio,
+                    top_ratio_min_samples=self.args.top_ratio_min_samples,
+                    top_ratio_momentum=self.args.top_ratio_momentum,
+                    default_threshold=self.args.default_ema_conf_threshold,
+                    normal_momentum=self.args.normal_ema_momentum,
+                )
+            else:
+                ema_counts = self.model.ema_update_anchors_confident(
+                    reps=z.detach(),
+                    labels=labels,
+                    soft_targets=soft_targets.detach(),
+                    momentum=self.args.prototype_momentum,
+                    threshold=self.args.ema_conf_threshold,
+                    class_thresholds=self.class_thresholds,
+                    use_fallback=self.args.use_ema_fallback,
+                    fallback_momentum=self.args.fallback_momentum,
+                )
             bsz = labels.size(0)
             total += bsz
             total_counts += assignment_counts.detach()
             total_ema_counts += ema_counts.detach()
+            total_hard_counts += hard_counts.detach()
+            for cls, values in batch_max_probs.items():
+                max_probs_by_class[cls].append(values.detach().cpu())
             sums["loss_total"] += float(loss.detach().cpu()) * bsz
             sums["loss_ce"] += float(loss_ce.detach().cpu()) * bsz
             sums["loss_proto"] += float(loss_proto.detach().cpu()) * bsz
@@ -258,6 +330,8 @@ class HDSATrainer:
         out["ot_max_prob_max"] = sums["ot_max_prob_max"]
         out["assignment_counts"] = total_counts.detach().cpu().tolist()
         out["ema_update_counts"] = total_ema_counts.detach().cpu().tolist()
+        out["hard_assignment_counts"] = total_hard_counts.detach().cpu().tolist()
+        out["class_ot_max_prob"] = self._max_prob_quantiles(max_probs_by_class)
         return out
 
     @torch.no_grad()
@@ -310,6 +384,59 @@ class HDSATrainer:
         if "happy" in self.label2id:
             thresholds[self.label2id["happy"]] = float(self.args.happy_conf_threshold)
         return thresholds
+
+    def _build_top_ratio_class_ids(self, class_names: str) -> set[int]:
+        class_ids = set()
+        for name in class_names.split(","):
+            name = name.strip()
+            if name in self.label2id:
+                class_ids.add(self.label2id[name])
+        return class_ids
+
+    def _early_stop_metric(self, dev_stats: dict[str, float], test_stats: dict[str, float]) -> float:
+        if self.args.early_stop_metric == "dev_weighted_f1":
+            return dev_stats["weighted_f1"]
+        if self.args.early_stop_metric == "dev_macro_f1":
+            return dev_stats["macro_f1"]
+        if self.args.early_stop_metric == "test_weighted_f1":
+            return test_stats["weighted_f1"]
+        raise ValueError(self.args.early_stop_metric)
+
+    def _ot_hard_diagnostics(
+        self,
+        labels: torch.Tensor,
+        soft_targets: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
+        cnum, mnum = self.args.num_classes, self.args.num_subanchors
+        target = soft_targets.reshape(-1, cnum, mnum)
+        hard_counts = torch.zeros(cnum, mnum, device=soft_targets.device)
+        max_probs_by_class = {}
+        for cls in range(cnum):
+            idx = torch.where(labels == cls)[0]
+            if idx.numel() == 0:
+                continue
+            gamma_cls = target[idx, cls]
+            max_prob, hard_sub = gamma_cls.max(dim=1)
+            max_probs_by_class[cls] = max_prob
+            hard_counts[cls].scatter_add_(0, hard_sub, torch.ones_like(max_prob))
+        return hard_counts, max_probs_by_class
+
+    def _max_prob_quantiles(self, max_probs_by_class: dict[int, list[torch.Tensor]]) -> dict[int, dict[str, float]]:
+        stats = {}
+        for cls, chunks in max_probs_by_class.items():
+            if not chunks:
+                stats[cls] = {"mean": 0.0, "min": 0.0, "p50": 0.0, "p70": 0.0, "p90": 0.0, "max": 0.0}
+                continue
+            values = torch.cat(chunks).float()
+            stats[cls] = {
+                "mean": float(values.mean().item()),
+                "min": float(values.min().item()),
+                "p50": float(torch.quantile(values, 0.50).item()),
+                "p70": float(torch.quantile(values, 0.70).item()),
+                "p90": float(torch.quantile(values, 0.90).item()),
+                "max": float(values.max().item()),
+            }
+        return stats
 
     def _build_intensity_targets(self) -> torch.Tensor:
         targets = torch.zeros(len(self.label2id), dtype=torch.long)
@@ -426,9 +553,15 @@ class HDSATrainer:
             f"  anchor_stats={row['anchor_stats']}",
             f"  test class_f1={self._select_metrics(test, [f'{name}_f1' for name in self.label2id])}",
             f"  test confusion_pairs={self._select_metrics(test, [f'confusion_{a}_to_{b}' for a, b in CONFUSION_LOG_PAIRS])}",
+            f"  best={row['best']}",
         ]
+        lines.append("  class_ot_max_prob:")
+        for label, stats in row["class_ot_max_prob"].items():
+            lines.append(f"    {label}: {stats}")
         for label, counts in row["ot_assignment_counts"].items():
             lines.append(f"  class {label} assignment: {counts}")
+        for label, counts in row["hard_assignment_counts"].items():
+            lines.append(f"  class {label} hard_assignment: {counts}")
         for label, counts in row["ema_update_counts"].items():
             lines.append(f"  class {label} ema_update: {counts}")
         return "\n".join(lines)
@@ -441,23 +574,30 @@ class HDSATrainer:
     def _named_counts(self, counts) -> dict[str, list[float]]:
         return {self.id2label[idx]: [round(float(v), 4) for v in counts[idx]] for idx in sorted(self.id2label)}
 
+    def _named_stats(self, stats: dict[int, dict[str, float]]) -> dict[str, dict[str, float]]:
+        return {
+            self.id2label[idx]: {key: round(float(value), 6) for key, value in stats.get(idx, {}).items()}
+            for idx in sorted(self.id2label)
+        }
+
     def _select_metrics(self, metrics: dict, keys: list[str]) -> dict:
         return {key: metrics[key] for key in keys if key in metrics}
 
     def _save_checkpoint(self, name: str, epoch: int, metrics: dict) -> None:
-        torch.save(
-            {
-                "model_state_dict": self.model.state_dict(),
-                "model_config": asdict(self.model.config),
-                "args": vars(self.args),
-                "label2id": self.label2id,
-                "id2label": self.id2label,
-                "anchors": self.model.get_anchors().detach().cpu(),
-                "epoch": epoch,
-                "metrics": metrics,
-            },
-            self.output_dir / name,
-        )
+        ckpt = {
+            "model_state_dict": self.model.state_dict(),
+            "model_config": asdict(self.model.config),
+            "args": vars(self.args),
+            "label2id": self.label2id,
+            "id2label": self.id2label,
+            "anchors": self.model.get_anchors().detach().cpu(),
+            "epoch": epoch,
+            "metrics": metrics,
+        }
+        if self.args.save_optimizer:
+            ckpt["optimizer_state_dict"] = self.optimizer.state_dict()
+            ckpt["scheduler_state_dict"] = self.scheduler.state_dict()
+        safe_torch_save(ckpt, self.output_dir / name)
 
     def _save_detailed_eval(self, split_name: str, y_true, y_pred, sample_ids, texts) -> None:
         labels = sorted(self.id2label)
@@ -536,3 +676,10 @@ class HDSATrainer:
 def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+
+def safe_torch_save(obj, path: Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
