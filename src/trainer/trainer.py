@@ -108,11 +108,12 @@ class HDSATrainer:
         for epoch in range(1, self.args.epochs + 1):
             last_epoch = epoch
             self._append_text(f"\n[{_now()}] epoch {epoch}/{self.args.epochs} started")
-            train_stats = self._train_one_epoch()
+            train_stats = self._train_one_epoch(epoch)
             dev_stats = self.evaluate(self.dev_loader)
             test_stats = self.evaluate(self.test_loader)
             assignment_counts = train_stats.pop("assignment_counts")
             ema_update_counts = train_stats.pop("ema_update_counts")
+            selected_for_ema_counts = train_stats.pop("selected_for_ema_counts")
             hard_assignment_counts = train_stats.pop("hard_assignment_counts")
             class_ot_max_prob = train_stats.pop("class_ot_max_prob")
             dev_wf1 = dev_stats["weighted_f1"]
@@ -156,6 +157,7 @@ class HDSATrainer:
                 "anchor_stats": anchor_similarity_stats(self.model.get_anchors().detach().cpu()),
                 "ot_assignment_counts": self._named_counts(assignment_counts),
                 "hard_assignment_counts": self._named_counts(hard_assignment_counts),
+                "selected_for_ema_counts": self._named_counts(selected_for_ema_counts),
                 "ema_update_counts": self._named_counts(ema_update_counts),
                 "class_ot_max_prob": self._named_stats(class_ot_max_prob),
                 "best": best_row,
@@ -192,7 +194,7 @@ class HDSATrainer:
         self._append_text("\nTraining finished.")
         self._append_text(json.dumps(final_summary, indent=2))
 
-    def _train_one_epoch(self) -> dict:
+    def _train_one_epoch(self, epoch: int) -> dict:
         self.model.train()
         sums = {
             "loss_total": 0.0,
@@ -215,8 +217,10 @@ class HDSATrainer:
             device=self.device,
         )
         total_ema_counts = torch.zeros_like(total_counts)
+        total_selected_for_ema_counts = torch.zeros_like(total_counts)
         total_hard_counts = torch.zeros_like(total_counts)
         max_probs_by_class: dict[int, list[torch.Tensor]] = {idx: [] for idx in range(self.args.num_classes)}
+        use_top_ratio_now = self.args.use_top_ratio_ema and epoch > self.args.top_ratio_warmup_epochs
         for batch in self.train_loader:
             labels = batch["labels"].to(self.device)
             outputs = self.model(
@@ -279,7 +283,7 @@ class HDSATrainer:
             self.optimizer.step()
             self.scheduler.step()
             if self.args.use_top_ratio_ema:
-                ema_counts = self.model.ema_update_anchors_top_ratio(
+                ema_counts, selected_counts = self.model.ema_update_anchors_top_ratio(
                     reps=z.detach(),
                     labels=labels,
                     soft_targets=soft_targets.detach(),
@@ -287,6 +291,8 @@ class HDSATrainer:
                     top_ratio=self.args.top_ratio_ema_ratio,
                     top_ratio_min_samples=self.args.top_ratio_min_samples,
                     top_ratio_momentum=self.args.top_ratio_momentum,
+                    top_ratio_min_conf=self.args.top_ratio_min_conf,
+                    use_top_ratio_now=use_top_ratio_now,
                     default_threshold=self.args.default_ema_conf_threshold,
                     normal_momentum=self.args.normal_ema_momentum,
                 )
@@ -301,10 +307,12 @@ class HDSATrainer:
                     use_fallback=self.args.use_ema_fallback,
                     fallback_momentum=self.args.fallback_momentum,
                 )
+                selected_counts = torch.zeros_like(ema_counts)
             bsz = labels.size(0)
             total += bsz
             total_counts += assignment_counts.detach()
             total_ema_counts += ema_counts.detach()
+            total_selected_for_ema_counts += selected_counts.detach()
             total_hard_counts += hard_counts.detach()
             for cls, values in batch_max_probs.items():
                 max_probs_by_class[cls].append(values.detach().cpu())
@@ -330,8 +338,10 @@ class HDSATrainer:
         out["ot_max_prob_max"] = sums["ot_max_prob_max"]
         out["assignment_counts"] = total_counts.detach().cpu().tolist()
         out["ema_update_counts"] = total_ema_counts.detach().cpu().tolist()
+        out["selected_for_ema_counts"] = total_selected_for_ema_counts.detach().cpu().tolist()
         out["hard_assignment_counts"] = total_hard_counts.detach().cpu().tolist()
         out["class_ot_max_prob"] = self._max_prob_quantiles(max_probs_by_class)
+        out["top_ratio_active"] = bool(use_top_ratio_now)
         return out
 
     @torch.no_grad()
@@ -540,6 +550,7 @@ class HDSATrainer:
                 f"max_prob_mean={train['ot_max_prob_mean']:.6f} "
                 f"max_prob_min={train['ot_max_prob_min']:.6f} max_prob_max={train['ot_max_prob_max']:.6f}"
             ),
+            f"  top_ratio_active={train.get('top_ratio_active', False)}",
             (
                 f"  dev  acc={dev['accuracy']:.6f} precision={dev['weighted_precision']:.6f} "
                 f"recall={dev['weighted_recall']:.6f} weighted_f1={dev['weighted_f1']:.6f} "
@@ -562,6 +573,8 @@ class HDSATrainer:
             lines.append(f"  class {label} assignment: {counts}")
         for label, counts in row["hard_assignment_counts"].items():
             lines.append(f"  class {label} hard_assignment: {counts}")
+        for label, counts in row["selected_for_ema_counts"].items():
+            lines.append(f"  class {label} selected_for_ema: {counts}")
         for label, counts in row["ema_update_counts"].items():
             lines.append(f"  class {label} ema_update: {counts}")
         return "\n".join(lines)

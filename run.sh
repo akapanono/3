@@ -28,9 +28,11 @@ python src/run.py \
   --normal_ema_momentum 0.95 \
   --use_top_ratio_ema \
   --top_ratio_ema_classes angry,frustrated \
-  --top_ratio_ema_ratio 0.30 \
-  --top_ratio_min_samples 8 \
-  --top_ratio_momentum 0.97 \
+  --top_ratio_ema_ratio 0.10 \
+  --top_ratio_min_samples 1 \
+  --top_ratio_momentum 0.995 \
+  --top_ratio_warmup_epochs 2 \
+  --top_ratio_min_conf 0.36 \
   --early_stop \
   --early_stop_metric dev_weighted_f1 \
   --early_stop_patience 3 \

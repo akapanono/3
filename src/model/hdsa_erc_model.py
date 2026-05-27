@@ -137,16 +137,19 @@ class HDSAERCModel(nn.Module):
         labels: torch.Tensor,
         soft_targets: torch.Tensor,
         top_ratio_class_ids: set[int],
-        top_ratio: float = 0.30,
-        top_ratio_min_samples: int = 8,
-        top_ratio_momentum: float = 0.97,
+        top_ratio: float = 0.10,
+        top_ratio_min_samples: int = 1,
+        top_ratio_momentum: float = 0.995,
+        top_ratio_min_conf: float = 0.36,
+        use_top_ratio_now: bool = True,
         default_threshold: float = 0.45,
         normal_momentum: float = 0.95,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         cnum, mnum, _ = self.domain_anchors.shape
         reps = F.normalize(reps.detach(), dim=-1)
         target = soft_targets.detach().reshape(-1, cnum, mnum)
         update_counts = torch.zeros(cnum, mnum, device=reps.device)
+        selected_top_ratio_counts = torch.zeros(cnum, mnum, device=reps.device)
         for cls in range(cnum):
             idx = torch.where(labels == cls)[0]
             if idx.numel() == 0:
@@ -154,12 +157,17 @@ class HDSAERCModel(nn.Module):
             z_cls = reps[idx]
             gamma_cls = target[idx, cls]
             max_prob, hard_sub = gamma_cls.max(dim=1)
-            if cls in top_ratio_class_ids:
+            uses_top_ratio = use_top_ratio_now and cls in top_ratio_class_ids
+            if uses_top_ratio:
                 k = max(int(idx.numel() * top_ratio), int(top_ratio_min_samples))
                 k = min(k, idx.numel())
                 if k <= 0:
                     continue
                 selected = torch.topk(max_prob, k=k, largest=True).indices
+                if top_ratio_min_conf > 0:
+                    selected = selected[max_prob[selected] >= top_ratio_min_conf]
+                if selected.numel() == 0:
+                    continue
                 z_keep = z_cls[selected]
                 sub_keep = hard_sub[selected]
                 momentum = top_ratio_momentum
@@ -179,7 +187,9 @@ class HDSAERCModel(nn.Module):
                 new = momentum * old + (1.0 - momentum) * mean
                 self.domain_anchors[cls, sub] = F.normalize(new, dim=-1)
                 update_counts[cls, sub] += sub_idx.numel()
-        return update_counts
+                if uses_top_ratio:
+                    selected_top_ratio_counts[cls, sub] += sub_idx.numel()
+        return update_counts, selected_top_ratio_counts
 
     def _load_or_init_anchors(self, config: HDSAConfig) -> torch.Tensor:
         if config.domain_anchor_path:
