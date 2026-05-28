@@ -39,7 +39,7 @@ python src/anchors/pretrain_hyp_domain_anchors.py \
   --same_upper 0.90
 ```
 
-## 3. Train HDSA-ERC
+## 3. Train HDSA-ERC Baseline
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/run.py \
@@ -65,22 +65,19 @@ CUDA_VISIBLE_DEVICES=0 python src/run.py \
   --ot_sharpen_power 2.0 \
   --prototype_momentum 0.95 \
   --ema_conf_threshold 0.45 \
-  --default_ema_conf_threshold 0.45 \
-  --normal_ema_momentum 0.95 \
-  --use_top_ratio_ema \
-  --top_ratio_ema_classes angry,frustrated \
-  --top_ratio_ema_ratio 0.10 \
-  --top_ratio_min_samples 1 \
-  --top_ratio_momentum 0.995 \
-  --top_ratio_warmup_epochs 2 \
-  --top_ratio_min_conf 0.36 \
   --early_stop \
   --early_stop_metric dev_weighted_f1 \
   --early_stop_patience 3 \
   --early_stop_min_delta 0.0001 \
   --save_best_dev \
   --save_best_test \
-  --experiment_name exp2_top_ratio_backoff
+  --experiment_name exp0_restore_baseline
+```
+
+Or run the baseline wrapper:
+
+```bash
+bash scripts/run_hdsa_baseline.sh
 ```
 
 ## Background Training
@@ -92,7 +89,7 @@ DATASET_DIR=data/IEMOCAP \
 BERT_PATH=pretrained/sup-simcse-roberta-large \
 DOMAIN_ANCHOR_PATH=domain_anchors/IEMOCAP_M3_hyp.pt \
 OUTPUT_DIR=outputs/hdsa_erc_iemocap \
-EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16 --use_top_ratio_ema --top_ratio_ema_classes angry,frustrated --top_ratio_ema_ratio 0.10 --top_ratio_min_samples 1 --top_ratio_momentum 0.995 --top_ratio_warmup_epochs 2 --top_ratio_min_conf 0.36 --early_stop --early_stop_metric dev_weighted_f1 --early_stop_patience 3 --save_best_dev --save_best_test --experiment_name exp2_top_ratio_backoff" \
+EXTRA_ARGS="--local_files_only --epochs 8 --batch_size 8 --eval_batch_size 16 --early_stop --early_stop_metric dev_weighted_f1 --early_stop_patience 3 --save_best_dev --save_best_test --experiment_name exp0_restore_baseline" \
 bash scripts/run_hdsa_background.sh
 ```
 
@@ -135,4 +132,4 @@ Training writes:
 - `dev_predictions.csv`
 - `test_predictions.csv`
 
-Every epoch logs `loss_total`, `loss_ce`, `loss_proto`, `loss_compact`, optional ablation losses, dev/test metrics, per-class F1, target confusion-pair counts, anchor similarity stats, OT entropy/max-prob stats, OT assignment counts, hard assignment counts, selected top-ratio EMA counts, class-wise OT max-prob quantiles, EMA update counts, and current best dev/test summaries. By default, all confusion optimization modules are off so Exp0 reproduces the anti-collapse baseline; enable `--use_top_ratio_ema` for the conservative angry/frustrated top-ratio hard EMA update.
+Every epoch logs `loss_total`, `loss_ce`, `loss_proto`, `loss_compact`, optional ablation losses, dev/test metrics, per-class F1, target confusion-pair counts, anchor similarity stats, OT entropy/max-prob stats, OT assignment counts, hard assignment counts, selected top-ratio EMA counts, class-wise OT max-prob quantiles, EMA update counts, and current best dev/test summaries. By default, top-ratio EMA, fallback EMA, pairwise losses, intensity loss, and happy CE reweighting are off so Exp0 restores the anti-collapse baseline.

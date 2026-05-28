@@ -2,12 +2,15 @@
 set -euo pipefail
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}" \
-python src/run.py \
+python -u src/run.py \
   --use_hdsa \
-  --dataset_name IEMOCAP \
-  --dataset_dir data/IEMOCAP \
-  --bert_path pretrained/sup-simcse-roberta-large \
-  --domain_anchor_path domain_anchors/IEMOCAP_M3_hyp.pt \
+  --dataset_name "${DATASET_NAME:-IEMOCAP}" \
+  --dataset_dir "${DATASET_DIR:-data/IEMOCAP}" \
+  --bert_path "${BERT_PATH:-pretrained/sup-simcse-roberta-large}" \
+  --domain_anchor_path "${DOMAIN_ANCHOR_PATH:-domain_anchors/IEMOCAP_M3_hyp.pt}" \
+  --output_dir "${OUTPUT_DIR:-outputs/hdsa_erc_iemocap_baseline}" \
+  --experiment_name "${EXPERIMENT_NAME:-exp0_restore_baseline}" \
+  --local_files_only \
   --num_subanchors 3 \
   --anchor_dim 256 \
   --anchor_temperature 0.1 \

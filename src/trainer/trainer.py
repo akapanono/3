@@ -273,10 +273,13 @@ class HDSATrainer:
                 loss_ce
                 + self.args.proto_loss_weight * loss_proto
                 + self.args.compact_loss_weight * loss_compact
-                + self.args.pair_loss_weight * loss_pair
-                + self.args.pair_anchor_loss_weight * loss_pair_anchor
-                + self.args.intensity_loss_weight * loss_intensity
             )
+            if self.args.pair_loss_weight > 0:
+                loss = loss + self.args.pair_loss_weight * loss_pair
+            if self.args.pair_anchor_loss_weight > 0:
+                loss = loss + self.args.pair_anchor_loss_weight * loss_pair_anchor
+            if self.args.intensity_loss_weight > 0:
+                loss = loss + self.args.intensity_loss_weight * loss_intensity
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
