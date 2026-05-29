@@ -17,6 +17,7 @@ conda-meta/
 /data/
 /outputs/
 /runs/
+/experiments/runs*/
 /checkpoints/
 /domain_anchors/
 /saved_models/

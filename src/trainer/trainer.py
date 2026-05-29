@@ -85,6 +85,7 @@ class HDSATrainer:
         self.class_thresholds = self._build_class_thresholds().to(self.device) if args.class_adaptive_ema else None
         self.top_ratio_class_ids = self._build_top_ratio_class_ids(args.top_ratio_ema_classes)
         self.intensity_targets_by_class = self._build_intensity_targets().to(self.device)
+        self.confusion_pairs = self._parse_confusion_pairs(args.confusion_pairs)
 
     def train(self) -> None:
         self._init_logs()
@@ -230,7 +231,7 @@ class HDSATrainer:
             )
             z = outputs["z"]
             anchors = outputs["anchors"]
-            loss_ce = F.cross_entropy(outputs["logits"], labels, weight=self.ce_weights)
+            loss_ce = self._classification_loss(outputs["logits"], labels)
             soft_targets, assigned_anchor, assignment_counts, ot_stats = ot_assign_by_class(
                 reps=z.detach(),
                 labels=labels,
@@ -252,7 +253,7 @@ class HDSATrainer:
                     outputs["logits"],
                     labels,
                     self.label2id,
-                    CONFUSION_PAIRS,
+                    self.confusion_pairs,
                     margin=self.args.pair_margin,
                 )
                 if self.args.pair_loss_weight > 0
@@ -262,7 +263,7 @@ class HDSATrainer:
                 pairwise_anchor_separation_loss(
                     anchors,
                     self.label2id,
-                    CONFUSION_PAIRS,
+                    self.confusion_pairs,
                     upper=self.args.pair_anchor_upper,
                 )
                 if self.args.pair_anchor_loss_weight > 0
@@ -361,7 +362,7 @@ class HDSATrainer:
                 attention_mask=batch["attention_mask"].to(self.device),
                 mask_pos=batch["mask_pos"].to(self.device),
             )
-            losses.append(float(F.cross_entropy(outputs["logits"], labels, weight=self.ce_weights).cpu()) * labels.size(0))
+            losses.append(float(self._classification_loss(outputs["logits"], labels).cpu()) * labels.size(0))
             y_true.extend(labels.cpu().tolist())
             y_pred.extend(outputs["logits"].argmax(dim=-1).cpu().tolist())
             sample_ids.extend(ex.sample_id for ex in batch["examples"])
@@ -390,6 +391,30 @@ class HDSATrainer:
         if "happy" in self.label2id:
             weights[self.label2id["happy"]] *= float(self.args.happy_ce_weight)
         return weights
+
+    def _classification_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        ce = F.cross_entropy(logits, labels, weight=self.ce_weights, reduction="none")
+        if self.args.focal_gamma <= 0:
+            return ce.mean()
+        probs = F.softmax(logits, dim=-1)
+        pt = probs.gather(1, labels[:, None]).squeeze(1).clamp_min(1e-8)
+        focal = ((1.0 - pt) ** self.args.focal_gamma) * ce
+        return focal.mean()
+
+    def _parse_confusion_pairs(self, raw: str) -> list[tuple[str, str]]:
+        pairs = []
+        for item in raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" in item:
+                left, right = item.split(":", 1)
+            elif "-" in item:
+                left, right = item.split("-", 1)
+            else:
+                raise ValueError(f"Invalid confusion pair '{item}'. Use name1:name2.")
+            pairs.append((left.strip(), right.strip()))
+        return pairs or CONFUSION_PAIRS
 
     def _build_class_thresholds(self) -> torch.Tensor:
         thresholds = torch.full((len(self.label2id),), float(self.args.default_ema_conf_threshold))

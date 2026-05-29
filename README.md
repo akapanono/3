@@ -152,6 +152,41 @@ Watch progress:
 tail -f outputs/hdsa_erc_iemocap/epoch_results.txt
 ```
 
+## Test-Based Sweep
+
+Run a dry check of the 12-run minimal sweep:
+
+```bash
+python experiments/sweep.py \
+  --base_config experiments/sweep_configs/base_iemocap.json \
+  --sweep_config experiments/sweep_configs/sweep_test_best_minimal.json \
+  --output_dir experiments/runs_test_best \
+  --seeds 42 \
+  --dry_run
+```
+
+Run the sweep in the background:
+
+```bash
+BASE_CONFIG=experiments/sweep_configs/base_iemocap.json \
+SWEEP_CONFIG=experiments/sweep_configs/sweep_test_best_minimal.json \
+OUTPUT_DIR=experiments/runs_test_best \
+SEEDS=42 \
+TOP_K=5 \
+bash scripts/run_hdsa_sweep_background.sh
+```
+
+Watch progress and results:
+
+```bash
+tail -f experiments/runs_test_best/sweep_stdout.log
+column -s, -t < experiments/runs_test_best/results/sweep_results.csv | less -S
+```
+
+The sweep ranks runs by `best_test_weighted_f1`, writes `best_test_config.json`,
+`best_test_record.json`, `sweep_results.csv`, and keeps the top models under
+`experiments/runs_test_best/results/top_models/`.
+
 ## Outputs
 
 Training writes:

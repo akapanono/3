@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context_window", type=int, default=12)
     parser.add_argument("--num_subanchors", type=int, default=3)
     parser.add_argument("--anchor_dim", type=int, default=256)
+    parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--anchor_temperature", type=float, default=0.1)
     parser.add_argument("--proto_temperature", type=float, default=0.1)
     parser.add_argument("--anchor_logit_weight", type=float, default=0.3)
@@ -66,9 +67,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top_ratio_min_conf", type=float, default=0.36)
     parser.add_argument("--pair_loss_weight", type=float, default=0.0)
     parser.add_argument("--pair_margin", type=float, default=0.20)
+    parser.add_argument("--confusion_pairs", type=str, default="angry:frustrated,happy:excited,neutral:frustrated")
     parser.add_argument("--pair_anchor_loss_weight", type=float, default=0.0)
     parser.add_argument("--pair_anchor_upper", type=float, default=0.20)
     parser.add_argument("--happy_ce_weight", type=float, default=1.0)
+    parser.add_argument("--focal_gamma", type=float, default=0.0)
     parser.add_argument("--use_intensity_head", action="store_true")
     parser.add_argument("--intensity_loss_weight", type=float, default=0.0)
     parser.add_argument("--batch_size", type=int, default=8)
@@ -132,6 +135,7 @@ def main() -> None:
         num_classes=len(label2id),
         num_subanchors=args.num_subanchors,
         anchor_dim=args.anchor_dim,
+        dropout=args.dropout,
         anchor_temperature=args.anchor_temperature,
         anchor_logit_weight=args.anchor_logit_weight,
         domain_anchor_path=args.domain_anchor_path,
@@ -156,6 +160,8 @@ def active_ablations(args: argparse.Namespace) -> list[str]:
         ablations.append("pairwise_anchor_loss")
     if abs(args.happy_ce_weight - 1.0) > 1e-8:
         ablations.append("happy_ce_weight")
+    if args.focal_gamma > 0:
+        ablations.append("focal_loss")
     if args.use_intensity_head and args.intensity_loss_weight > 0:
         ablations.append("intensity_head")
     return ablations

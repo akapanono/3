@@ -1,0 +1,114 @@
+{
+  "runs": [
+    {
+      "name": "base_pair005",
+      "learning_rate": 2e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.0,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "pair003",
+      "learning_rate": 2e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.03,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.0,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "pair008",
+      "learning_rate": 2e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.08,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.0,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "pair005_margin04",
+      "learning_rate": 2e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.05,
+      "pair_margin": 0.4,
+      "pair_anchor_weight": 0.0,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "anchor001",
+      "learning_rate": 2e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.01,
+      "pair_anchor_margin": 0.3,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "anchor003",
+      "learning_rate": 2e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.03,
+      "pair_anchor_margin": 0.3,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "happy12",
+      "learning_rate": 2e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.01,
+      "happy_weight": 1.2
+    },
+    {
+      "name": "happy15",
+      "learning_rate": 2e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.01,
+      "happy_weight": 1.5
+    },
+    {
+      "name": "lr1e5",
+      "learning_rate": 1e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.01,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "lr3e5",
+      "learning_rate": 3e-5,
+      "dropout": 0.2,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.01,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "dropout01",
+      "learning_rate": 2e-5,
+      "dropout": 0.1,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.01,
+      "happy_weight": 1.0
+    },
+    {
+      "name": "dropout03",
+      "learning_rate": 2e-5,
+      "dropout": 0.3,
+      "pair_weight": 0.05,
+      "pair_margin": 0.3,
+      "pair_anchor_weight": 0.01,
+      "happy_weight": 1.0
+    }
+  ]
+}
