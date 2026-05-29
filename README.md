@@ -80,6 +80,41 @@ Or run the baseline wrapper:
 bash scripts/run_hdsa_baseline.sh
 ```
 
+## 4. Diagnose Domain Anchors
+
+Use this before a long training run when `angry` or `frustrated` OT assignment looks uniform:
+
+```bash
+python tools/diagnose_domain_anchors.py \
+  --dataset_name IEMOCAP \
+  --dataset_dir data/IEMOCAP \
+  --bert_path pretrained/sup-simcse-roberta-large \
+  --domain_anchor_path domain_anchors/IEMOCAP_M3_hyp.pt \
+  --raw_anchor_path domain_anchors/IEMOCAP_M3_kmeans.pt \
+  --pretrain_anchor_path domain_anchors/IEMOCAP_M3_hyp.pt \
+  --local_files_only \
+  --split train \
+  --num_subanchors 3 \
+  --anchor_dim 256 \
+  --target_classes angry,frustrated \
+  --output_path outputs/diagnose_domain_anchors_report.json
+```
+
+If you want the diagnosis to use a trained model representation space, also pass:
+
+```bash
+--checkpoint_path outputs/hdsa_erc_iemocap_baseline/best_dev_model.pt
+```
+
+For a short OT trace, add `--debug_ot`. The training path and diagnosis path both call
+`src.hdsa.ot_utils.sinkhorn_assignment`, so the reported OT behavior matches training.
+
+Run the synthetic OT regression tests with:
+
+```bash
+python -m pytest tests/test_sinkhorn_assignment.py -q
+```
+
 ## Background Training
 
 ```bash

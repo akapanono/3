@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--same_upper", type=float, default=0.90)
     parser.add_argument("--ot_epsilon", type=float, default=0.02)
     parser.add_argument("--ot_iters", type=int, default=50)
+    parser.add_argument("--debug_ot", action="store_true")
     parser.add_argument("--ot_sharpen_power", type=float, default=2.0)
     parser.add_argument("--prototype_momentum", type=float, default=0.95)
     parser.add_argument("--ema_conf_threshold", type=float, default=0.45)

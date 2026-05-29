@@ -14,7 +14,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from src.anchors.anchor_utils import anchor_similarity_stats
-from src.anchors.sinkhorn import ot_assign_by_class
+from src.hdsa.ot_utils import ot_assign_by_class
 from src.metrics import classification_metrics
 from src.model import HDSAConfig, HDSAERCModel
 from src.model.hdsa_losses import (
@@ -237,6 +237,8 @@ class HDSATrainer:
                 anchors=anchors.detach(),
                 epsilon=self.args.ot_epsilon,
                 n_iters=self.args.ot_iters,
+                debug=self.args.debug_ot,
+                id2label=self.id2label,
             )
             hard_counts, batch_max_probs = self._ot_hard_diagnostics(labels, soft_targets.detach())
             flat_anchors = anchors.reshape(self.args.num_classes * self.args.num_subanchors, self.args.anchor_dim)
