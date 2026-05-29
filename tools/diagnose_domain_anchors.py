@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ot_epsilon", type=float, default=0.02)
     parser.add_argument("--ot_iters", type=int, default=50)
     parser.add_argument("--debug_ot", action="store_true")
+    parser.add_argument("--warn_ot_uniform", action="store_true")
     parser.add_argument("--device", type=str, default=None)
     return parser.parse_args()
 
@@ -319,6 +320,7 @@ def compute_ot_diagnostics(
     epsilon: float,
     n_iters: int,
     debug: bool = False,
+    warn_uniform: bool = False,
 ) -> dict[str, Any]:
     reps, anchors = validate_rep_anchor_dims(reps, anchors)
     soft_targets, _, assignment_counts, global_stats = ot_assign_by_class(
@@ -329,6 +331,7 @@ def compute_ot_diagnostics(
         n_iters=n_iters,
         debug=debug,
         id2label=id2label,
+        warn_uniform=warn_uniform or debug,
     )
     cnum, mnum = anchors.size(0), anchors.size(1)
     target = soft_targets.reshape(-1, cnum, mnum)
@@ -500,6 +503,7 @@ def main() -> None:
             epsilon=args.ot_epsilon,
             n_iters=args.ot_iters,
             debug=args.debug_ot,
+            warn_uniform=args.warn_ot_uniform,
         )
     )
     report["stage_compare"] = compare_stages(

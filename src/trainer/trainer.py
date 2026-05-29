@@ -239,6 +239,7 @@ class HDSATrainer:
                 n_iters=self.args.ot_iters,
                 debug=self.args.debug_ot,
                 id2label=self.id2label,
+                warn_uniform=self.args.warn_ot_uniform or self.args.debug_ot,
             )
             hard_counts, batch_max_probs = self._ot_hard_diagnostics(labels, soft_targets.detach())
             flat_anchors = anchors.reshape(self.args.num_classes * self.args.num_subanchors, self.args.anchor_dim)

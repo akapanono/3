@@ -106,8 +106,10 @@ If you want the diagnosis to use a trained model representation space, also pass
 --checkpoint_path outputs/hdsa_erc_iemocap_baseline/best_dev_model.pt
 ```
 
-For a short OT trace, add `--debug_ot`. The training path and diagnosis path both call
-`src.hdsa.ot_utils.sinkhorn_assignment`, so the reported OT behavior matches training.
+For a short OT trace, add `--debug_ot`. To show only near-uniform OT warnings,
+add `--warn_ot_uniform`; normal training keeps these warnings off so logs stay readable.
+The training path and diagnosis path both call `src.hdsa.ot_utils.sinkhorn_assignment`,
+so the reported OT behavior matches training.
 
 Run the synthetic OT regression tests with:
 

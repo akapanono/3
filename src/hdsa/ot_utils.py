@@ -80,7 +80,7 @@ def ot_assign_by_class(
     n_iters: int = 50,
     debug: bool = False,
     id2label: dict[int, str] | None = None,
-    warn_uniform: bool = True,
+    warn_uniform: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
     bsz, dim = reps.shape
     cnum, mnum, _ = anchors.shape
